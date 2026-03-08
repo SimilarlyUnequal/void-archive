@@ -1,0 +1,69 @@
+name: void-archive
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Every Sunday at 12:00 AM UTC
+  workflow_dispatch:       # Manual trigger from GitHub UI
+    inputs:
+      specific_repo:
+        description: 'Full URL to sync (leave empty to sync first repo in list)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+
+      # ── 1. Checkout ──────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Configure Git ─────────────────────────────────────
+      - name: Configure Git
+        run: |
+          git config --global user.email "void-archive@noreply"
+          git config --global user.name "void-archive"
+          git config --global credential.helper ""
+          git config --global core.askPass ""
+
+      # ── 3. Run sync ──────────────────────────────────────────
+      - name: Run sync
+        env:
+          REMOTE_TOKEN:   ${{ secrets.REMOTE_TOKEN }}
+          REMOTE_URL:     ${{ secrets.REMOTE_URL }}
+          PARENT_FOLDER:  ${{ secrets.PARENT_FOLDER }}
+          REPOS_FILE:     repos.txt
+          SINGLE_REPO:    ${{ github.event.inputs.specific_repo }}
+          IS_MANUAL:      ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [ "$IS_MANUAL" = "true" ]; then
+            if [ -n "$SINGLE_REPO" ]; then
+              echo "$SINGLE_REPO" > repos.txt
+            else
+              FIRST=$(grep -v '^\s*#' repos.txt | grep -v '^\s*$' | head -n 1)
+              echo "$FIRST" > repos.txt
+            fi
+          fi
+          chmod +x sync.sh
+          bash sync.sh
+
+      # ── 4. Upload log ────────────────────────────────────────
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-log-${{ github.run_id }}
+          path: /tmp/sync.log
+          retention-days: 30
+
+      # ── 5. Print log ─────────────────────────────────────────
+      - name: Print log
+        if: always()
+        run: cat /tmp/sync.log || true

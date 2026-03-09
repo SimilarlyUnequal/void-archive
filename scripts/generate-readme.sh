@@ -79,6 +79,10 @@ clone_profile_repo() {
   git config user.name "void-archive"
 }
 
+# ── Resolve REPOS_FILE to absolute path before any cd ────────
+REPOS_FILE=$(realpath "$REPOS_FILE")
+export REPOS_FILE
+
 # ── Step 3: Fetch topics + update state ───────────────────────
 update_state() {
   local state_file="$WORK_DIR/state.json"
@@ -164,7 +168,8 @@ from collections import defaultdict
 with open("$state_file") as f:
     state = json.load(f)
 
-with open("$REPOS_FILE") as f:
+import os
+with open(os.environ.get("REPOS_FILE", "$REPOS_FILE")) as f:
     lines = f.readlines()
 
 # ── Parse repos.txt ──────────────────────────────────────────
@@ -242,7 +247,7 @@ for cat in sorted(categories.keys()):
         status = info.get("status", "pending")
         last_success = info.get("last_success") or "—"
         topics = info.get("topics") or []
-        topic_str = " ".join(f"`{t}`" for t in topics[:3]) if topics else "—"
+        topic_str = " ".join(f"<code>{t}</code>" for t in topics[:3]) if topics else "—"
 
         if status == "success":
             badge = "✅"

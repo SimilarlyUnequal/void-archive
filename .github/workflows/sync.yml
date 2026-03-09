@@ -44,23 +44,17 @@ jobs:
           ADDED=0
           SKIPPED=0
 
-          # Split on https:// to handle GitHub Actions collapsing newlines
-          SPLIT_REPOS=$(echo "$ADD_REPOS"             | sed 's|https://|\nhttps://|g'             | grep '^https://')
-
           while IFS= read -r url; do
-            url=$(echo "$url" | tr -d '[:space:]')
             [ -z "$url" ] && continue
-
             if grep -qF "$url" repos.txt; then
               echo "⏭️  Already exists: $(basename $url .git)"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
-
             echo "$url" >> repos.txt
             echo "➕ Added: $(basename $url .git)"
             ADDED=$((ADDED + 1))
-          done <<< "$SPLIT_REPOS"
+          done <<< "$(echo "$ADD_REPOS" | python3 scripts/split-urls.py)"
 
           echo "📊 Added: $ADDED  Skipped: $SKIPPED"
 
@@ -89,10 +83,9 @@ jobs:
 
             elif [ -n "$ADD_REPOS" ]; then
               echo "📥 Syncing newly added repos only"
-              printf '%s\n' "$ADD_REPOS" | while IFS= read -r line; do
-                line=$(echo "$line" | tr -d '[:space:]')
-                echo "$line"
-              done | grep '^http' > repos.txt
+              echo "$ADD_REPOS" | python3 scripts/split-urls.py > repos.txt
+              echo "URLs to sync:"
+              cat repos.txt
 
             else
               echo "🎯 Single repo mode: first in list"

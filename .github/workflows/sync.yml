@@ -1,23 +1,21 @@
-name: 🪐 void-archive
+name: void-archive
 
 on:
   schedule:
-    - cron: '0 0 * * 0'  # Every Sunday at 12:00 AM UTC
+    - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
       specific_repo:
-        description: |
-          TEST — Single URL to sync (leave empty = first repo in list)
+        description: 'TEST: Single URL to sync (empty = first repo in list)'
         required: false
         default: ''
       add_repos:
-        description: |
-          ADD — New URLs to add to repos.txt (one per line, duplicates ignored)
+        description: 'ADD: New URLs to add (one per line, duplicates ignored)'
         required: false
         default: ''
 
 permissions:
-  contents: write   # needed to commit updated repos.txt back
+  contents: write
 
 jobs:
   sync:
@@ -27,11 +25,9 @@ jobs:
 
     steps:
 
-      # ── 1. Checkout ──────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Configure Git ─────────────────────────────────────
       - name: Configure Git
         run: |
           git config --global user.email "void-archive@noreply"
@@ -39,100 +35,91 @@ jobs:
           git config --global credential.helper ""
           git config --global core.askPass ""
 
-      # ── 3. Add new repos to repos.txt if provided ────────────
-      # Runs before sync so newly added repos are synced too
+      # ── Add new repos to repos.txt if provided ───────────────
       - name: Add repos to list
         if: ${{ github.event.inputs.add_repos != '' }}
         env:
           ADD_REPOS: ${{ github.event.inputs.add_repos }}
         run: |
-          echo "📥 Adding new repos to list..."
           ADDED=0
           SKIPPED=0
 
           while IFS= read -r url; do
-            # Trim whitespace
             url=$(echo "$url" | tr -d '[:space:]')
-
-            # Skip empty lines
             [ -z "$url" ] && continue
 
-            # Skip if already exists
             if grep -qF "$url" repos.txt; then
               echo "⏭️  Already exists: $(basename $url .git)"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
 
-            # Append to repos.txt
             echo "$url" >> repos.txt
             echo "➕ Added: $(basename $url .git)"
             ADDED=$((ADDED + 1))
-
           done <<< "$ADD_REPOS"
 
-          echo ""
-          echo "📊 Added: $ADDED  Skipped (duplicate): $SKIPPED"
+          echo "📊 Added: $ADDED  Skipped: $SKIPPED"
 
-          # Commit back to GitHub only if something changed
           if [ "$ADDED" -gt 0 ]; then
             git add repos.txt
             git commit -m "repos: add $ADDED new repo(s)"
             git push
-            echo "✅ repos.txt updated and committed"
           fi
 
-      # ── 4. Run sync ──────────────────────────────────────────
+      # ── Run sync ─────────────────────────────────────────────
       - name: Run sync
         env:
-          REMOTE_TOKEN:   ${{ secrets.REMOTE_TOKEN }}
-          REMOTE_URL:     ${{ secrets.REMOTE_URL }}
-          PARENT_FOLDER:  ${{ secrets.PARENT_FOLDER }}
-          REPOS_FILE:     repos.txt
-          SINGLE_REPO:    ${{ github.event.inputs.specific_repo }}
-          ADD_REPOS:      ${{ github.event.inputs.add_repos }}
-          IS_MANUAL:      ${{ github.event_name == 'workflow_dispatch' }}
+          REMOTE_TOKEN:  ${{ secrets.REMOTE_TOKEN }}
+          REMOTE_URL:    ${{ secrets.REMOTE_URL }}
+          PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
+          REPOS_FILE:    repos.txt
+          SINGLE_REPO:   ${{ github.event.inputs.specific_repo }}
+          ADD_REPOS:     ${{ github.event.inputs.add_repos }}
+          IS_MANUAL:     ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           if [ "$IS_MANUAL" = "true" ]; then
+
             if [ -n "$SINGLE_REPO" ]; then
-              # Manual + URL → sync that specific URL only
               echo "🎯 Single repo mode: provided URL"
               echo "$SINGLE_REPO" > repos.txt
 
             elif [ -n "$ADD_REPOS" ]; then
-              # Manual + add_repos → sync only the newly added URLs
-              echo "📥 Sync mode: newly added repos only"
-              echo "$ADD_REPOS" | grep -v '^\s*#' | grep -v '^\s*$' | tr -d '[:space:]'                 | tr ',' '
-' | grep '^http' > repos.txt
+              echo "📥 Syncing newly added repos only"
+              printf '%s\n' "$ADD_REPOS" | while IFS= read -r line; do
+                line=$(echo "$line" | tr -d '[:space:]')
+                echo "$line"
+              done | grep '^http' > repos.txt
 
             else
-              # Manual + nothing → sync first repo in list
-              FIRST=$(grep -v '^\s*#' repos.txt | grep -v '^\s*$' | head -n 1)
               echo "🎯 Single repo mode: first in list"
+              FIRST=$(grep -v '^\s*#' repos.txt | grep -v '^\s*$' | head -n 1)
               echo "$FIRST" > repos.txt
             fi
+
           else
             echo "📋 Scheduled run — using full repos.txt"
           fi
+
           chmod +x scripts/sync.sh
           bash scripts/sync.sh || true
 
-      # ── 5. Generate group README ─────────────────────────────
+      # ── Generate group README ─────────────────────────────────
       - name: Generate README
         if: always()
         env:
-          REMOTE_TOKEN:   ${{ secrets.REMOTE_TOKEN }}
-          REMOTE_URL:     ${{ secrets.REMOTE_URL }}
-          PARENT_FOLDER:  ${{ secrets.PARENT_FOLDER }}
-          PROFILE_REPO:   ${{ secrets.PROFILE_REPO }}
-          REPOS_FILE:     repos.txt
-          GITHUB_TOKEN:   ${{ secrets.GITHUB_TOKEN }}
+          REMOTE_TOKEN:  ${{ secrets.REMOTE_TOKEN }}
+          REMOTE_URL:    ${{ secrets.REMOTE_URL }}
+          PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
+          PROFILE_REPO:  ${{ secrets.PROFILE_REPO }}
+          REPOS_FILE:    repos.txt
+          GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
         run: |
           git checkout repos.txt 2>/dev/null || true
           chmod +x scripts/generate-readme.sh
           bash scripts/generate-readme.sh
 
-      # ── 6. Upload log ────────────────────────────────────────
+      # ── Upload log ───────────────────────────────────────────
       - name: Upload log
         if: always()
         uses: actions/upload-artifact@v4
@@ -141,7 +128,7 @@ jobs:
           path: /tmp/sync.log
           retention-days: 30
 
-      # ── 7. Print log ─────────────────────────────────────────
+      # ── Print log ────────────────────────────────────────────
       - name: Print log
         if: always()
         run: cat /tmp/sync.log || true

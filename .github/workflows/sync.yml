@@ -90,13 +90,23 @@ jobs:
           PARENT_FOLDER:  ${{ secrets.PARENT_FOLDER }}
           REPOS_FILE:     repos.txt
           SINGLE_REPO:    ${{ github.event.inputs.specific_repo }}
+          ADD_REPOS:      ${{ github.event.inputs.add_repos }}
           IS_MANUAL:      ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           if [ "$IS_MANUAL" = "true" ]; then
             if [ -n "$SINGLE_REPO" ]; then
+              # Manual + URL → sync that specific URL only
               echo "🎯 Single repo mode: provided URL"
               echo "$SINGLE_REPO" > repos.txt
+
+            elif [ -n "$ADD_REPOS" ]; then
+              # Manual + add_repos → sync only the newly added URLs
+              echo "📥 Sync mode: newly added repos only"
+              echo "$ADD_REPOS" | grep -v '^\s*#' | grep -v '^\s*$' | tr -d '[:space:]'                 | tr ',' '
+' | grep '^http' > repos.txt
+
             else
+              # Manual + nothing → sync first repo in list
               FIRST=$(grep -v '^\s*#' repos.txt | grep -v '^\s*$' | head -n 1)
               echo "🎯 Single repo mode: first in list"
               echo "$FIRST" > repos.txt

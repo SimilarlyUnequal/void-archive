@@ -44,6 +44,9 @@ jobs:
           ADDED=0
           SKIPPED=0
 
+          # Split on https:// to handle GitHub Actions collapsing newlines
+          SPLIT_REPOS=$(echo "$ADD_REPOS"             | sed 's|https://|\nhttps://|g'             | grep '^https://')
+
           while IFS= read -r url; do
             url=$(echo "$url" | tr -d '[:space:]')
             [ -z "$url" ] && continue
@@ -57,7 +60,7 @@ jobs:
             echo "$url" >> repos.txt
             echo "➕ Added: $(basename $url .git)"
             ADDED=$((ADDED + 1))
-          done <<< "$ADD_REPOS"
+          done <<< "$SPLIT_REPOS"
 
           echo "📊 Added: $ADDED  Skipped: $SKIPPED"
 

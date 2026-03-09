@@ -31,4 +31,3 @@ https://github.com/go-gitea/gitea
 https://github.com/beclab/Olares
 https://github.com/Oghamark/homebranch
 https://github.com/Raphire/Win11Debloat
-https://github.com/ImranR98/Obtainiumhttps://github.com/NeoApplications/Neo-Store

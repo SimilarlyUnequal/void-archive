@@ -1,12 +1,4 @@
 #!/bin/bash
-# =============================================================
-#  void-archive — generate-readme.sh
-#  Generates a dashboard README.md for the remote group page
-#  - Auto-categorizes repos by GitHub topic tags (API)
-#  - Topics cached in state.json to minimize API calls
-#  - Manual # comments in repos.txt override auto categories
-#  - Per-repo last synced timestamps from state.json
-# =============================================================
 
 set -euo pipefail
 

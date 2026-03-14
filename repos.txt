@@ -33,3 +33,4 @@ https://github.com/Oghamark/homebranch
 https://github.com/Raphire/Win11Debloat
 https://github.com/ImranR98/Obtainium
 https://github.com/NeoApplications/Neo-Store
+https://github.com/chartdb/chartdb

@@ -333,25 +333,25 @@ except Exception:
 " 2>/dev/null || echo ""
 }
 
-# ── Move GitLab project to a different namespace ──────────────
+# ── Transfer GitLab project to a different namespace ──────────
 move_project() {
   local project_id="$1"
-  local target_namespace_id="$2"
+  local target_namespace="$2"   # full path e.g. "codeark/bitwarden"
 
-  log "   🚚 Moving repo to subgroup..."
+  log "   🚚 Transferring repo to subgroup..."
   local response result body
   response=$(curl -s -w "\n%{http_code}" \
     --request PUT \
     --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
     --header "Content-Type: application/json" \
-    --data "{\"namespace_id\": $target_namespace_id}" \
-    "$REMOTE_URL/api/v4/projects/$project_id")
+    --data "{\"namespace\": \"$target_namespace\"}" \
+    "$REMOTE_URL/api/v4/projects/$project_id/transfer")
 
   result=$(echo "$response" | tail -1)
   body=$(echo "$response" | head -n -1)
 
   if [ "$result" == "200" ]; then
-    log "   ✅ Repo moved to subgroup"
+    log "   ✅ Repo transferred to subgroup"
     return 0
   else
     local api_error
@@ -359,12 +359,11 @@ move_project() {
 import sys, json
 try:
     data = json.load(sys.stdin)
-    msg = data.get('message', data)
-    print(str(msg)[:200])
-except Exception as e:
+    print(str(data.get('message', data))[:200])
+except Exception:
     print(sys.stdin.read()[:200])
 " 2>/dev/null)
-    log "   ❌ Move failed (HTTP $result): $api_error"
+    log "   ❌ Transfer failed (HTTP $result): $api_error"
     return 1
   fi
 }
@@ -391,12 +390,13 @@ ensure_remote_repo() {
     local root_proj_id
     root_proj_id=$(get_project_id "$root_path")
     if [ -n "$root_proj_id" ]; then
-      log "   📦 Repo found at root — moving to subgroup"
-      if move_project "$root_proj_id" "$namespace_id"; then
+      log "   📦 Repo found at root — transferring to subgroup"
+      local target_namespace="${PARENT_FOLDER}/${subgroup}"
+      if move_project "$root_proj_id" "$target_namespace"; then
         RESOLVED_DEST_URL="${REMOTE_URL/https:\/\//https://oauth2:${REMOTE_TOKEN}@}/${full_path}.git"
         return 0
       else
-        log "   ⚠️  Move failed — creating fresh under subgroup"
+        log "   ⚠️  Transfer failed — will create fresh under subgroup"
       fi
     fi
 
@@ -424,19 +424,28 @@ ensure_remote_repo() {
   result=$(echo "$response" | tail -1)
   body=$(echo "$response" | head -n -1)
 
-  if [ "$result" != "201" ]; then
-    local api_error
-    api_error=$(echo "$body" | python3 -c "
+  if [ "$result" == "201" ]; then
+    return 0
+  fi
+
+  local api_error
+  api_error=$(echo "$body" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    print(data.get('message', 'unknown error'))
+    print(str(data.get('message', 'unknown error'))[:200])
 except Exception:
     print('unknown error')
 " 2>/dev/null)
-    log "   ❌ Failed to create repo (HTTP $result): $api_error"
-    return 1
+
+  # Treat "already taken" as success — repo exists, just not detected earlier
+  if echo "$api_error" | grep -qi "already been taken\|already exists"; then
+    log "   📦 Repo already exists — proceeding"
+    return 0
   fi
+
+  log "   ❌ Failed to create repo (HTTP $result): $api_error"
+  return 1
 }
 
 # ── Sync a single repo ────────────────────────────────────────

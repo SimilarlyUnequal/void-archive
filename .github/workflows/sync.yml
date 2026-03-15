@@ -36,6 +36,9 @@ jobs:
           git config --global credential.helper ""
           git config --global core.askPass ""
 
+      - name: Install PyYAML
+        run: pip install pyyaml -q --break-system-packages
+
       # ── Fetch previous state for SHA comparison ───────────────
       - name: Fetch previous state
         env:
@@ -60,7 +63,7 @@ jobs:
           REMOTE_TOKEN:  ${{ secrets.REMOTE_TOKEN }}
           REMOTE_URL:    ${{ secrets.REMOTE_URL }}
           PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
-          REPOS_FILE:    repos.txt
+          REPOS_FILE:     repos.yml
           GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
           FORCE_FULL:        ${{ github.event.inputs.force_full == 'true' && 'true' || 'false' }}
           SINGLE_REPO:       ${{ github.event.inputs.specific_repo }}
@@ -105,11 +108,11 @@ jobs:
           PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
           STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
           STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
-          REPOS_FILE:       repos.txt
+          REPOS_FILE:     repos.yml
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
           README_ONLY:      "false"
         run: |
-          git checkout repos.txt 2>/dev/null || true
+          git checkout repos.yml 2>/dev/null || true
           chmod +x scripts/generate-readme.sh
           bash scripts/generate-readme.sh
 

@@ -24,6 +24,9 @@ jobs:
           git config --global credential.helper ""
           git config --global core.askPass ""
 
+      - name: Install PyYAML
+        run: pip install pyyaml -q --break-system-packages
+
       # ── Regenerate README from existing state ─────────────────
       # Reads state.json from GitHub private repo (source of truth)
       # Does NOT modify state.json — read only
@@ -36,7 +39,7 @@ jobs:
           PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
           STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
           STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
-          REPOS_FILE:       repos.txt
+          REPOS_FILE:     repos.yml
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
           README_ONLY:      "true"
         run: |

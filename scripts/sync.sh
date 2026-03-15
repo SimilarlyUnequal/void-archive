@@ -1,4 +1,17 @@
 #!/bin/bash
+# =============================================================
+#  void-archive — sync.sh
+#  Syncs selected OSS repos to a remote git host
+#  - Reads repos.yml (grouped + ungrouped)
+#  - Creates GitLab subgroups automatically
+#  - Detects LFS via API before cloning — moves to lfs-repos.txt
+#  - Checks latest commit SHA via API — skips unchanged repos
+#  - FORCE_FULL=true bypasses SHA check
+#  - Fetches only branches + tags (no PR/issue refs)
+#  - Writes sync-results.json via Python (safe JSON escaping)
+#  - Retries on network failure
+#  - Suppresses verbose git output
+# =============================================================
 
 set -euo pipefail
 
@@ -11,16 +24,14 @@ export GIT_ASKPASS=/bin/false
 : "${PARENT_FOLDER:?❌  PARENT_FOLDER is not set}"
 : "${REPOS_FILE:?❌  REPOS_FILE is not set}"
 : "${GITHUB_TOKEN:?❌  GITHUB_TOKEN is not set}"
+: "${GITHUB_WORKSPACE:?❌  GITHUB_WORKSPACE is not set}"
 
 # ── Optional ──────────────────────────────────────────────────
 FORCE_FULL="${FORCE_FULL:-false}"
 
 # ── Resolve workspace paths ───────────────────────────────────
-# REPOS_FILE and LFS_FILE must be absolute paths
-# GITHUB_WORKSPACE is set automatically by GitHub Actions
-WORKSPACE="${GITHUB_WORKSPACE:?❌  GITHUB_WORKSPACE is not set}"
 REPOS_FILE="$(realpath "$REPOS_FILE")"
-LFS_FILE="${WORKSPACE}/lfs-repos.txt"
+LFS_FILE="${GITHUB_WORKSPACE}/lfs-repos.txt"
 
 # ── Internal config ───────────────────────────────────────────
 WORK_DIR="/tmp/void-work"
@@ -38,7 +49,7 @@ SKIPPED=0
 LFS_MOVED=0
 FAILED_REPOS=()
 
-# ── In-memory results dict (written to JSON at end via Python) ─
+# ── In-memory results ─────────────────────────────────────────
 RESULTS_DATA="{}"
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -87,26 +98,18 @@ github_api() {
 }
 
 # ── Detect LFS via GitHub API ─────────────────────────────────
-# Checks .gitattributes for lfs filter — no cloning needed
 has_lfs() {
   local owner="$1"
   local repo="$2"
-
   local response
   response=$(github_api "/repos/${owner}/${repo}/contents/.gitattributes")
-
   [ -z "$response" ] && return 1
-
-  # Decode base64 content and check for lfs
   echo "$response" | python3 -c "
 import sys, json, base64
 try:
     data = json.load(sys.stdin)
     content = base64.b64decode(data.get('content', '')).decode('utf-8', errors='ignore')
-    if 'lfs' in content.lower():
-        sys.exit(0)
-    else:
-        sys.exit(1)
+    sys.exit(0 if 'lfs' in content.lower() else 1)
 except Exception:
     sys.exit(1)
 " 2>/dev/null
@@ -116,20 +119,14 @@ except Exception:
 get_latest_sha() {
   local owner="$1"
   local repo="$2"
-
   local response
   response=$(github_api "/repos/${owner}/${repo}/commits?per_page=1")
-
   [ -z "$response" ] && echo "" && return 0
-
   echo "$response" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    if isinstance(data, list) and len(data) > 0:
-        print(data[0].get('sha', ''))
-    else:
-        print('')
+    print(data[0].get('sha', '') if isinstance(data, list) and data else '')
 except Exception:
     print('')
 " 2>/dev/null || echo ""
@@ -150,35 +147,65 @@ except Exception:
 " 2>/dev/null || echo ""
 }
 
-# ── Move repo from repos.txt to lfs-repos.txt ─────────────────
+# ── Move repo to LFS exclusion list ──────────────────────────
 move_to_lfs_file() {
   local url="$1"
+  local repos_file="$REPOS_FILE"
 
-  # Remove from repos.txt
-  local tmp
-  tmp=$(mktemp)
-  grep -vF "$url" "$REPOS_FILE" > "$tmp" || true
-  mv "$tmp" "$REPOS_FILE"
+  # Remove from repos.yml using Python
+  python3 - "$repos_file" "$url" << 'PYEOF'
+import sys, yaml
 
-  # Append to lfs-repos.txt if not already there
+repos_file = sys.argv[1]
+url        = sys.argv[2]
+
+try:
+    with open(repos_file) as f:
+        data = yaml.safe_load(f) or {}
+except Exception as e:
+    print(f"[lfs] repos.yml read error: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# Remove from groups
+for group in (data.get("groups") or {}).values():
+    if group and url in group:
+        group.remove(url)
+
+# Remove from ungrouped
+ungrouped = data.get("ungrouped") or []
+if url in ungrouped:
+    ungrouped.remove(url)
+data["ungrouped"] = ungrouped
+
+try:
+    with open(repos_file, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+    print(f"✅ Removed from repos.yml")
+except Exception as e:
+    print(f"[lfs] repos.yml write error: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+
+  # Append to lfs-repos.txt
   touch "$LFS_FILE"
   if ! grep -qF "$url" "$LFS_FILE"; then
     echo "$url" >> "$LFS_FILE"
   fi
 }
 
-# ── Add result entry to in-memory dict ───────────────────────
+# ── Add result entry ──────────────────────────────────────────
 add_result() {
   local url="$1"
-  local status="$2"
-  local clone_time="${3:-0}"
-  local push_time="${4:-0}"
-  local total_time="${5:-0}"
-  local repo_size="${6:-—}"
-  local branches="${7:-0}"
-  local tags="${8:-0}"
-  local retries="${9:-0}"
-  local commit_sha="${10:-}"
+  local subgroup="$2"
+  local status="$3"
+  local clone_time="${4:-0}"
+  local push_time="${5:-0}"
+  local total_time="${6:-0}"
+  local repo_size="${7:-—}"
+  local branches="${8:-0}"
+  local tags="${9:-0}"
+  local retries="${10:-0}"
+  local commit_sha="${11:-}"
 
   RESULTS_DATA=$(python3 -c "
 import json, sys
@@ -187,39 +214,71 @@ try:
 except Exception:
     data = {}
 data[sys.argv[2]] = {
-    'status':          sys.argv[3],
-    'clone_time':      int(sys.argv[4]),
-    'push_time':       int(sys.argv[5]),
-    'total_time':      int(sys.argv[6]),
-    'size':            sys.argv[7],
-    'branches':        int(sys.argv[8]) if sys.argv[8].isdigit() else 0,
-    'tags':            int(sys.argv[9]) if sys.argv[9].isdigit() else 0,
-    'retries':         int(sys.argv[10]),
-    'last_commit_sha': sys.argv[11],
+    'subgroup':        sys.argv[3],
+    'status':          sys.argv[4],
+    'clone_time':      int(sys.argv[5]),
+    'push_time':       int(sys.argv[6]),
+    'total_time':      int(sys.argv[7]),
+    'size':            sys.argv[8],
+    'branches':        int(sys.argv[9])  if sys.argv[9].isdigit()  else 0,
+    'tags':            int(sys.argv[10]) if sys.argv[10].isdigit() else 0,
+    'retries':         int(sys.argv[11]),
+    'last_commit_sha': sys.argv[12],
 }
 print(json.dumps(data))
-" "$RESULTS_DATA" "$url" "$status" \
+" "$RESULTS_DATA" "$url" "$subgroup" "$status" \
     "$clone_time" "$push_time" "$total_time" \
     "$repo_size" "$branches" "$tags" \
     "$retries" "$commit_sha" 2>/dev/null) || true
 }
 
-# ── Remote API: ensure destination repo exists ────────────────
-ensure_remote_repo() {
-  local repo_name="$1"
+# ── Ensure GitLab namespace (group or subgroup) exists ────────
+ensure_namespace() {
+  local subgroup="$1"   # empty = use parent group directly
+
+  if [ -z "$subgroup" ]; then
+    # No subgroup — get parent group ID
+    curl -s \
+      --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+      "$REMOTE_URL/api/v4/groups?search=$PARENT_FOLDER" \
+      | python3 -c "
+import sys, json
+try:
+    groups = json.load(sys.stdin)
+    print(next((g['id'] for g in groups if g['path'] == '$PARENT_FOLDER'), ''))
+except Exception:
+    print('')
+"
+    return 0
+  fi
+
+  # Check if subgroup already exists
+  local full_path="${PARENT_FOLDER}/${subgroup}"
   local encoded_path
   encoded_path=$(python3 -c \
-    "import urllib.parse; print(urllib.parse.quote('${PARENT_FOLDER}/${repo_name}', safe=''))")
+    "import urllib.parse; print(urllib.parse.quote('$full_path', safe=''))")
 
-  local status
-  status=$(curl -s -o /dev/null -w "%{http_code}" \
+  local existing
+  existing=$(curl -s \
     --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-    "$REMOTE_URL/api/v4/projects/$encoded_path")
+    "$REMOTE_URL/api/v4/groups/$encoded_path" \
+    | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('id', ''))
+except Exception:
+    print('')
+")
 
-  [ "$status" == "200" ] && return 0
+  if [ -n "$existing" ]; then
+    echo "$existing"
+    return 0
+  fi
 
-  local group_id
-  group_id=$(curl -s \
+  # Create subgroup under parent
+  local parent_id
+  parent_id=$(curl -s \
     --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
     "$REMOTE_URL/api/v4/groups?search=$PARENT_FOLDER" \
     | python3 -c "
@@ -231,21 +290,63 @@ except Exception:
     print('')
 ")
 
-  if [ -z "$group_id" ]; then
-    log "   ❌ Could not find destination group"
+  if [ -z "$parent_id" ]; then
+    log "   ❌ Could not find parent group"
+    echo ""
     return 1
   fi
+
+  log "   🆕 Creating subgroup: $subgroup"
+  curl -s \
+    --request POST \
+    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+    --header "Content-Type: application/json" \
+    --data "{\"name\":\"$subgroup\",\"path\":\"$subgroup\",\"parent_id\":$parent_id,\"visibility\":\"private\"}" \
+    "$REMOTE_URL/api/v4/groups" \
+    | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('id', ''))
+except Exception:
+    print('')
+"
+}
+
+# ── Ensure destination repo exists under namespace ────────────
+ensure_remote_repo() {
+  local repo_name="$1"
+  local namespace_id="$2"
+  local subgroup="$3"
+
+  local full_path
+  if [ -n "$subgroup" ]; then
+    full_path="${PARENT_FOLDER}/${subgroup}/${repo_name}"
+  else
+    full_path="${PARENT_FOLDER}/${repo_name}"
+  fi
+
+  local encoded_path
+  encoded_path=$(python3 -c \
+    "import urllib.parse; print(urllib.parse.quote('$full_path', safe=''))")
+
+  local status
+  status=$(curl -s -o /dev/null -w "%{http_code}" \
+    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+    "$REMOTE_URL/api/v4/projects/$encoded_path")
+
+  [ "$status" == "200" ] && return 0
 
   local result
   result=$(curl -s -o /dev/null -w "%{http_code}" \
     --request POST \
     --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
     --header "Content-Type: application/json" \
-    --data "{\"name\":\"$repo_name\",\"path\":\"$repo_name\",\"namespace_id\":$group_id,\"visibility\":\"private\"}" \
+    --data "{\"name\":\"$repo_name\",\"path\":\"$repo_name\",\"namespace_id\":$namespace_id,\"visibility\":\"private\"}" \
     "$REMOTE_URL/api/v4/projects")
 
   if [ "$result" != "201" ]; then
-    log "   ❌ Failed to create destination repo (HTTP $result)"
+    log "   ❌ Failed to create repo (HTTP $result)"
     return 1
   fi
 }
@@ -253,57 +354,78 @@ except Exception:
 # ── Sync a single repo ────────────────────────────────────────
 sync_repo() {
   local source_url="$1"
+  local subgroup="$2"   # may be empty
+
   local repo_name
   repo_name=$(basename "$source_url" .git)
   local owner
   owner=$(echo "$source_url" | sed 's|https://github.com/||' | cut -d/ -f1)
   local work_dir="$WORK_DIR/$repo_name"
-  local dest_url
-  dest_url="${REMOTE_URL/https:\/\//https://oauth2:${REMOTE_TOKEN}@}/${PARENT_FOLDER}/${repo_name}.git"
 
-  log "⏳ $repo_name"
+  # Build dest URL with subgroup path if present
+  local dest_path
+  if [ -n "$subgroup" ]; then
+    dest_path="${PARENT_FOLDER}/${subgroup}/${repo_name}.git"
+  else
+    dest_path="${PARENT_FOLDER}/${repo_name}.git"
+  fi
+  local dest_url
+  dest_url="${REMOTE_URL/https:\/\//https://oauth2:${REMOTE_TOKEN}@}/${dest_path}"
+
+  local display_name
+  [ -n "$subgroup" ] && display_name="$subgroup/$repo_name" || display_name="$repo_name"
+  log "⏳ $display_name"
 
   # ── LFS check ─────────────────────────────────────────────────
-  # Skip if already in lfs-repos.txt
   touch "$LFS_FILE"
-  if grep -qF "$source_url" "$LFS_FILE"; then
-    log "⏭️  $repo_name — already in LFS exclusion list"
+  if grep -qF "$source_url" "$LFS_FILE" 2>/dev/null; then
+    log "⏭️  $display_name — already in LFS exclusion list"
     SKIPPED=$((SKIPPED + 1))
     return 0
   fi
 
-  # Check for LFS via API
   if has_lfs "$owner" "$repo_name"; then
-    log "🗂️  $repo_name — LFS detected, moving to exclusion list"
+    log "🗂️  $display_name — LFS detected, moving to exclusion list"
     move_to_lfs_file "$source_url"
     LFS_MOVED=$((LFS_MOVED + 1))
     return 0
   fi
 
   # ── SHA check ─────────────────────────────────────────────────
-  local current_sha=""
-  local last_sha=""
+  local current_sha="" last_sha=""
 
   if [ "$FORCE_FULL" = "true" ]; then
-    log "   🔁 Force full sync — skipping SHA check"
+    log "   🔁 Force full sync"
   else
     current_sha=$(get_latest_sha "$owner" "$repo_name")
     last_sha=$(get_last_sha "$source_url")
 
     if [ -n "$current_sha" ] && [ -n "$last_sha" ] && [ "$current_sha" = "$last_sha" ]; then
-      log "⏭️  $repo_name — no changes since last sync"
-      add_result "$source_url" "skipped" 0 0 0 "—" 0 0 0 "$current_sha"
+      log "⏭️  $display_name — no changes since last sync"
+      add_result "$source_url" "$subgroup" "skipped" 0 0 0 "—" 0 0 0 "$current_sha"
       SKIPPED=$((SKIPPED + 1))
       return 0
     fi
-
     [ -z "$current_sha" ] && log "   ⚠️  Could not fetch SHA — proceeding anyway"
   fi
 
-  # ── Ensure destination repo exists ───────────────────────────
-  if ! ensure_remote_repo "$repo_name"; then
-    log "❌ $repo_name — could not prepare destination"
-    add_result "$source_url" "failed" 0 0 0 "—" 0 0 0 "$current_sha"
+  # ── Ensure namespace + repo exist ────────────────────────────
+  local namespace_id
+  namespace_id=$(ensure_namespace "$subgroup")
+
+  if [ -z "$namespace_id" ]; then
+    log "❌ $display_name — could not prepare namespace"
+    add_result "$source_url" "$subgroup" "failed" 0 0 0 "—" 0 0 0 "$current_sha"
+    FAILED=$((FAILED + 1))
+    FAILED_REPOS+=("$display_name")
+    return 1
+  fi
+
+  if ! ensure_remote_repo "$repo_name" "$namespace_id" "$subgroup"; then
+    log "❌ $display_name — could not prepare destination repo"
+    add_result "$source_url" "$subgroup" "failed" 0 0 0 "—" 0 0 0 "$current_sha"
+    FAILED=$((FAILED + 1))
+    FAILED_REPOS+=("$display_name")
     return 1
   fi
 
@@ -321,35 +443,36 @@ sync_repo() {
       '+refs/heads/*:refs/heads/*' \
       '+refs/tags/*:refs/tags/*'
   ); then
-    log "❌ $repo_name — fetch failed"
+    log "❌ $display_name — fetch failed"
     rm -rf "$work_dir"
-    add_result "$source_url" "failed" 0 0 0 "—" 0 0 0 "$current_sha"
+    add_result "$source_url" "$subgroup" "failed" 0 0 0 "—" 0 0 0 "$current_sha"
+    FAILED=$((FAILED + 1))
+    FAILED_REPOS+=("$display_name")
     return 1
   fi
 
   clone_end=$(date +%s)
   clone_time=$((clone_end - clone_start))
 
-  # ── Repo metrics ──────────────────────────────────────────────
+  # ── Metrics ───────────────────────────────────────────────────
   local repo_size repo_size_bytes branch_count tag_count
   repo_size_bytes=$(du -sb "$work_dir" 2>/dev/null | cut -f1 || echo 0)
   repo_size=$(python3 -c "
-s = $repo_size_bytes
-if s < 1024: print(f'{s} B')
-elif s < 1048576: print(f'{s/1024:.1f} KB')
-elif s < 1073741824: print(f'{s/1048576:.1f} MB')
+s=$repo_size_bytes
+if s<1024: print(f'{s} B')
+elif s<1048576: print(f'{s/1024:.1f} KB')
+elif s<1073741824: print(f'{s/1048576:.1f} MB')
 else: print(f'{s/1073741824:.2f} GB')
 ")
   cd "$work_dir"
   branch_count=$(git branch | wc -l | tr -d ' ')
   tag_count=$(git tag | wc -l | tr -d ' ')
 
-  # ── Push: branches + tags only ────────────────────────────────
+  # ── Push ──────────────────────────────────────────────────────
   local push_start push_end push_time retries=0
   push_start=$(date +%s)
+  local push_attempt=1 push_ok=false
 
-  local push_attempt=1
-  local push_ok=false
   while [ $push_attempt -le $MAX_RETRIES ]; do
     if silent git push --prune "$dest_url" \
         '+refs/heads/*:refs/heads/*' \
@@ -373,15 +496,17 @@ else: print(f'{s/1073741824:.2f} GB')
   rm -rf "$work_dir"
 
   if [ "$push_ok" = false ]; then
-    log "❌ $repo_name — push failed"
-    add_result "$source_url" "failed" \
+    log "❌ $display_name — push failed"
+    add_result "$source_url" "$subgroup" "failed" \
       "$clone_time" "$push_time" "$total_time" \
       "$repo_size" "$branch_count" "$tag_count" "$retries" "$current_sha"
+    FAILED=$((FAILED + 1))
+    FAILED_REPOS+=("$display_name")
     return 1
   fi
 
-  log "✅ $repo_name (clone: ${clone_time}s push: ${push_time}s total: ${total_time}s size: $repo_size)"
-  add_result "$source_url" "success" \
+  log "✅ $display_name (clone: ${clone_time}s push: ${push_time}s total: ${total_time}s size: $repo_size)"
+  add_result "$source_url" "$subgroup" "success" \
     "$clone_time" "$push_time" "$total_time" \
     "$repo_size" "$branch_count" "$tag_count" "$retries" "$current_sha"
   SUCCESS=$((SUCCESS + 1))
@@ -398,22 +523,34 @@ main() {
     exit 1
   fi
 
+  # Check PyYAML available
+  python3 -c "import yaml" 2>/dev/null || {
+    log "📦 Installing PyYAML..."
+    pip install pyyaml -q --break-system-packages 2>/dev/null || \
+    pip3 install pyyaml -q 2>/dev/null || true
+  }
+
   mkdir -p "$WORK_DIR"
   touch "$LFS_FILE"
 
   TOTAL_START=$(date +%s)
 
-  # Read repos into array first — repos.txt may change during loop (LFS removal)
-  mapfile -t REPO_URLS < <(grep -v '^\s*#' "$REPOS_FILE" | grep -v '^\s*$' | grep '^http' || true)
+  # Parse repos.yml into "url subgroup" lines
+  mapfile -t REPO_LINES < <(python3 scripts/parse-repos.py "$REPOS_FILE" 2>/dev/null || true)
 
-  for url in "${REPO_URLS[@]}"; do
-    sync_repo "$url" || FAILED_REPOS+=("$(basename "$url" .git)")
+  for line in "${REPO_LINES[@]}"; do
+    local url subgroup
+    url=$(echo "$line" | awk '{print $1}')
+    subgroup=$(echo "$line" | awk '{print $2}')
+    subgroup="${subgroup:-}"
+    [ -z "$url" ] && continue
+    sync_repo "$url" "$subgroup"
   done
 
   TOTAL_END=$(date +%s)
   TOTAL_RUN=$((TOTAL_END - TOTAL_START))
 
-  # ── Write results JSON via Python (safe escaping) ─────────────
+  # Write results JSON safely via Python
   echo "$RESULTS_DATA" | python3 -c "
 import json, sys
 try:
@@ -427,17 +564,13 @@ except Exception as e:
 "
 
   hr
-  log "📊 Done — ✅ $SUCCESS synced  ⏭️  $SKIPPED skipped  🗂️  $LFS_MOVED moved to LFS list  ❌ ${#FAILED_REPOS[@]} failed  ⏱️  ${TOTAL_RUN}s"
+  log "📊 Done — ✅ $SUCCESS synced  ⏭️  $SKIPPED skipped  🗂️  $LFS_MOVED LFS moved  ❌ ${#FAILED_REPOS[@]} failed  ⏱️  ${TOTAL_RUN}s"
 
   if [ ${#FAILED_REPOS[@]} -gt 0 ]; then
     log "🔴 Failed:"
     for r in "${FAILED_REPOS[@]}"; do
       log "   - $r"
     done
-  fi
-
-  if [ "$LFS_MOVED" -gt 0 ]; then
-    log "🗂️  Moved to LFS exclusion list — will be committed by workflow"
   fi
   hr
 

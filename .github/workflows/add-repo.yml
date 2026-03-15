@@ -7,6 +7,10 @@ on:
         description: 'URLs to add (one per line, duplicates ignored)'
         required: true
         default: ''
+      group:
+        description: 'Subgroup name (optional — empty = ungrouped)'
+        required: false
+        default: ''
       sync_after:
         description: 'Sync newly added repos immediately after adding'
         type: boolean
@@ -34,47 +38,51 @@ jobs:
           git config --global credential.helper ""
           git config --global core.askPass ""
 
-      # ── Add URLs to repos.txt ─────────────────────────────────
+      - name: Install PyYAML
+        run: pip install pyyaml -q --break-system-packages
+
+      # ── Add URLs to repos.yml ─────────────────────────────────
       - name: Add repos to list
         env:
           ADD_REPOS: ${{ github.event.inputs.urls }}
+          GROUP:     ${{ github.event.inputs.group }}
         run: |
-          touch "$GITHUB_WORKSPACE/lfs-repos.txt"
+          touch lfs-repos.txt
           ADDED=0
           SKIPPED=0
           LFS_BLOCKED=0
 
+          CLEAN_URLS=$(echo "$ADD_REPOS" | python3 scripts/split-urls.py)
+
           while IFS= read -r url; do
             [ -z "$url" ] && continue
 
-            # Skip if already in lfs exclusion list
-            if grep -qF "$url" lfs-repos.txt; then
+            if grep -qF "$url" lfs-repos.txt 2>/dev/null; then
               echo "🗂️  LFS excluded: $(basename $url .git)"
               LFS_BLOCKED=$((LFS_BLOCKED + 1))
               continue
             fi
 
-            # Skip if already in repos.txt
-            if grep -qF "$url" repos.txt; then
+            EXISTS=$(python3 scripts/check-in-repos.py repos.yml "$url")
+            if [ "$EXISTS" = "yes" ]; then
               echo "⏭️  Already exists: $(basename $url .git)"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
 
-            echo "$url" >> repos.txt
-            echo "➕ Added: $(basename $url .git)"
+            python3 scripts/add-to-repos.py repos.yml "$url" "$GROUP"
+            echo "➕ Added: $(basename $url .git)${GROUP:+ → $GROUP}"
             ADDED=$((ADDED + 1))
-          done <<< "$(echo "$ADD_REPOS" | python3 scripts/split-urls.py)"
+          done <<< "$CLEAN_URLS"
 
           echo ""
           echo "📊 Added: $ADDED  Skipped: $SKIPPED  LFS blocked: $LFS_BLOCKED"
 
           if [ "$ADDED" -gt 0 ]; then
-            git add repos.txt
-            git commit -m "repos: add $ADDED new repo(s)"
+            git add repos.yml
+            git commit -m "repos: add $ADDED new repo(s)${GROUP:+ to $GROUP}"
             git push
-            echo "✅ repos.txt committed"
-            echo "$ADD_REPOS" | python3 scripts/split-urls.py > /tmp/newly-added.txt
+            echo "$CLEAN_URLS" > /tmp/newly-added.txt
           else
             echo "" > /tmp/newly-added.txt
           fi
@@ -100,28 +108,28 @@ jobs:
       - name: Sync newly added repos
         if: ${{ github.event.inputs.sync_after == 'true' }}
         env:
-          REMOTE_TOKEN:  ${{ secrets.REMOTE_TOKEN }}
-          REMOTE_URL:    ${{ secrets.REMOTE_URL }}
-          PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
-          REPOS_FILE:        /tmp/newly-added.txt
-          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
-          FORCE_FULL:        "true"
-          GITHUB_WORKSPACE:  ${{ github.workspace }}
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
+          REMOTE_URL:       ${{ secrets.REMOTE_URL }}
+          PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
+          REPOS_FILE:       /tmp/newly-added.yml
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          FORCE_FULL:       "true"
+          GROUP:            ${{ github.event.inputs.group }}
         run: |
           if [ ! -s /tmp/newly-added.txt ]; then
             echo "⏭️  Nothing new to sync"
             exit 0
           fi
-          echo "📋 Repos to sync:"
-          cat /tmp/newly-added.txt
+          python3 scripts/make-temp-repos.py /tmp/newly-added.txt "$GROUP" /tmp/newly-added.yml
           chmod +x scripts/sync.sh
           bash scripts/sync.sh || true
 
-      # ── Commit lfs-repos.txt if LFS detected during sync ─────
+      # ── Commit lfs changes ────────────────────────────────────
       - name: Commit lfs changes
         if: ${{ github.event.inputs.sync_after == 'true' }}
         run: |
-          git add repos.txt lfs-repos.txt 2>/dev/null || true
+          git add repos.yml lfs-repos.txt 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "📋 No LFS changes"
           else
@@ -139,11 +147,11 @@ jobs:
           PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
           STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
           STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
-          REPOS_FILE:       repos.txt
+          REPOS_FILE:       repos.yml
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
           README_ONLY:      "false"
         run: |
-          git checkout repos.txt 2>/dev/null || true
+          git checkout repos.yml 2>/dev/null || true
           chmod +x scripts/generate-readme.sh
           bash scripts/generate-readme.sh
 

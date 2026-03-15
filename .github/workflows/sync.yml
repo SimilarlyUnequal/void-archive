@@ -62,11 +62,12 @@ jobs:
           PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
           REPOS_FILE:    repos.txt
           GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
-          FORCE_FULL:    ${{ github.event.inputs.force_full == 'true' && 'true' || 'false' }}
-          SINGLE_REPO:   ${{ github.event.inputs.specific_repo }}
-          IS_MANUAL:     ${{ github.event_name == 'workflow_dispatch' }}
+          FORCE_FULL:        ${{ github.event.inputs.force_full == 'true' && 'true' || 'false' }}
+          SINGLE_REPO:       ${{ github.event.inputs.specific_repo }}
+          IS_MANUAL:         ${{ github.event_name == 'workflow_dispatch' }}
+          GITHUB_WORKSPACE:  ${{ github.workspace }}
         run: |
-          touch lfs-repos.txt
+          touch "$GITHUB_WORKSPACE/lfs-repos.txt"
 
           if [ "$IS_MANUAL" = "true" ] && [ -n "$SINGLE_REPO" ]; then
             echo "🎯 Single repo mode"

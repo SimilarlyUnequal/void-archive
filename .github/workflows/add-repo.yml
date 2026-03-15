@@ -39,7 +39,7 @@ jobs:
         env:
           ADD_REPOS: ${{ github.event.inputs.urls }}
         run: |
-          touch lfs-repos.txt
+          touch "$GITHUB_WORKSPACE/lfs-repos.txt"
           ADDED=0
           SKIPPED=0
           LFS_BLOCKED=0
@@ -103,9 +103,10 @@ jobs:
           REMOTE_TOKEN:  ${{ secrets.REMOTE_TOKEN }}
           REMOTE_URL:    ${{ secrets.REMOTE_URL }}
           PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
-          REPOS_FILE:    /tmp/newly-added.txt
-          GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
-          FORCE_FULL:    "true"
+          REPOS_FILE:        /tmp/newly-added.txt
+          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
+          FORCE_FULL:        "true"
+          GITHUB_WORKSPACE:  ${{ github.workspace }}
         run: |
           if [ ! -s /tmp/newly-added.txt ]; then
             echo "⏭️  Nothing new to sync"

@@ -15,12 +15,18 @@ export GIT_ASKPASS=/bin/false
 # ── Optional ──────────────────────────────────────────────────
 FORCE_FULL="${FORCE_FULL:-false}"
 
+# ── Resolve workspace paths ───────────────────────────────────
+# REPOS_FILE and LFS_FILE must be absolute paths
+# GITHUB_WORKSPACE is set automatically by GitHub Actions
+WORKSPACE="${GITHUB_WORKSPACE:?❌  GITHUB_WORKSPACE is not set}"
+REPOS_FILE="$(realpath "$REPOS_FILE")"
+LFS_FILE="${WORKSPACE}/lfs-repos.txt"
+
 # ── Internal config ───────────────────────────────────────────
 WORK_DIR="/tmp/void-work"
 LOG_FILE="/tmp/sync.log"
 RESULTS_FILE="/tmp/sync-results.json"
 PREV_STATE="/tmp/prev-state.json"
-LFS_FILE="lfs-repos.txt"
 MAX_RETRIES=3
 RETRY_DELAY=10
 API_COOLDOWN=0.5

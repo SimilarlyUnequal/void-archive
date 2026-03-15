@@ -339,19 +339,32 @@ move_project() {
   local target_namespace_id="$2"
 
   log "   🚚 Moving repo to subgroup..."
-  local result
-  result=$(curl -s -o /dev/null -w "%{http_code}" \
+  local response result body
+  response=$(curl -s -w "\n%{http_code}" \
     --request PUT \
     --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
     --header "Content-Type: application/json" \
     --data "{\"namespace_id\": $target_namespace_id}" \
     "$REMOTE_URL/api/v4/projects/$project_id")
 
+  result=$(echo "$response" | tail -1)
+  body=$(echo "$response" | head -n -1)
+
   if [ "$result" == "200" ]; then
     log "   ✅ Repo moved to subgroup"
     return 0
   else
-    log "   ❌ Move failed (HTTP $result)"
+    local api_error
+    api_error=$(echo "$body" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    msg = data.get('message', data)
+    print(str(msg)[:200])
+except Exception as e:
+    print(sys.stdin.read()[:200])
+" 2>/dev/null)
+    log "   ❌ Move failed (HTTP $result): $api_error"
     return 1
   fi
 }
@@ -399,6 +412,7 @@ ensure_remote_repo() {
   fi
 
   # Case 3: does not exist anywhere → create under correct namespace
+  log "   🆕 Creating repo (namespace_id: $namespace_id)"
   local response result body
   response=$(curl -s -w "\n%{http_code}" \
     --request POST \

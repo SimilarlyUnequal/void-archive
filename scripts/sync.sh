@@ -313,40 +313,114 @@ except Exception:
 "
 }
 
-# ── Ensure destination repo exists under namespace ────────────
+# ── Get GitLab project ID from path ──────────────────────────
+get_project_id() {
+  local path="$1"
+  local encoded
+  encoded=$(python3 -c \
+    "import urllib.parse; print(urllib.parse.quote('${path}', safe=''))")
+  curl -s \
+    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+    "$REMOTE_URL/api/v4/projects/$encoded" \
+    | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    pid = data.get('id', '')
+    print(pid if pid else '')
+except Exception:
+    print('')
+" 2>/dev/null || echo ""
+}
+
+# ── Move GitLab project to a different namespace ──────────────
+move_project() {
+  local project_id="$1"
+  local target_namespace_id="$2"
+
+  log "   🚚 Moving repo to subgroup..."
+  local result
+  result=$(curl -s -o /dev/null -w "%{http_code}" \
+    --request PUT \
+    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+    --header "Content-Type: application/json" \
+    --data "{\"namespace_id\": $target_namespace_id}" \
+    "$REMOTE_URL/api/v4/projects/$project_id")
+
+  if [ "$result" == "200" ]; then
+    log "   ✅ Repo moved to subgroup"
+    return 0
+  else
+    log "   ❌ Move failed (HTTP $result)"
+    return 1
+  fi
+}
+
+# ── Ensure destination repo exists under correct namespace ────
 ensure_remote_repo() {
   local repo_name="$1"
   local namespace_id="$2"
   local subgroup="$3"
 
-  local full_path
   if [ -n "$subgroup" ]; then
-    full_path="${PARENT_FOLDER}/${subgroup}/${repo_name}"
+    local full_path="${PARENT_FOLDER}/${subgroup}/${repo_name}"
+    local root_path="${PARENT_FOLDER}/${repo_name}"
+
+    # Case 1: already exists at subgroup path ✅
+    local subgroup_proj_id
+    subgroup_proj_id=$(get_project_id "$full_path")
+    if [ -n "$subgroup_proj_id" ]; then
+      log "   📦 Repo exists at subgroup path"
+      return 0
+    fi
+
+    # Case 2: exists at root → move it to subgroup
+    local root_proj_id
+    root_proj_id=$(get_project_id "$root_path")
+    if [ -n "$root_proj_id" ]; then
+      log "   📦 Repo found at root — moving to subgroup"
+      if move_project "$root_proj_id" "$namespace_id"; then
+        RESOLVED_DEST_URL="${REMOTE_URL/https:\/\//https://oauth2:${REMOTE_TOKEN}@}/${full_path}.git"
+        return 0
+      else
+        log "   ⚠️  Move failed — creating fresh under subgroup"
+      fi
+    fi
+
   else
-    full_path="${PARENT_FOLDER}/${repo_name}"
+    # No subgroup — check root only
+    local root_path="${PARENT_FOLDER}/${repo_name}"
+    local root_proj_id
+    root_proj_id=$(get_project_id "$root_path")
+    if [ -n "$root_proj_id" ]; then
+      log "   📦 Repo exists at root"
+      return 0
+    fi
   fi
 
-  local encoded_path
-  encoded_path=$(python3 -c \
-    "import urllib.parse; print(urllib.parse.quote('$full_path', safe=''))")
-
-  local status
-  status=$(curl -s -o /dev/null -w "%{http_code}" \
-    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-    "$REMOTE_URL/api/v4/projects/$encoded_path")
-
-  [ "$status" == "200" ] && return 0
-
-  local result
-  result=$(curl -s -o /dev/null -w "%{http_code}" \
+  # Case 3: does not exist anywhere → create under correct namespace
+  local response result body
+  response=$(curl -s -w "\n%{http_code}" \
     --request POST \
     --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
     --header "Content-Type: application/json" \
     --data "{\"name\":\"$repo_name\",\"path\":\"$repo_name\",\"namespace_id\":$namespace_id,\"visibility\":\"private\"}" \
     "$REMOTE_URL/api/v4/projects")
 
+  result=$(echo "$response" | tail -1)
+  body=$(echo "$response" | head -n -1)
+
   if [ "$result" != "201" ]; then
-    log "   ❌ Failed to create repo (HTTP $result)"
+    local api_error
+    api_error=$(echo "$body" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('message', 'unknown error'))
+except Exception:
+    print('unknown error')
+" 2>/dev/null)
+    log "   ❌ Failed to create repo (HTTP $result): $api_error"
     return 1
   fi
 }
@@ -421,6 +495,10 @@ sync_repo() {
     return 1
   fi
 
+  # RESOLVED_DEST_URL may be updated by ensure_remote_repo
+  # if repo found at a different path (e.g. root instead of subgroup)
+  RESOLVED_DEST_URL="$dest_url"
+
   if ! ensure_remote_repo "$repo_name" "$namespace_id" "$subgroup"; then
     log "❌ $display_name — could not prepare destination repo"
     add_result "$source_url" "$subgroup" "failed" 0 0 0 "—" 0 0 0 "$current_sha"
@@ -428,6 +506,9 @@ sync_repo() {
     FAILED_REPOS+=("$display_name")
     return 1
   fi
+
+  # Use resolved dest URL (may have changed if repo found at root)
+  dest_url="$RESOLVED_DEST_URL"
 
   mkdir -p "$work_dir"
 

@@ -1,0 +1,122 @@
+name: void-archive — add repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'URLs to add (one per line, duplicates ignored)'
+        required: true
+        default: ''
+      sync_after:
+        description: 'Sync newly added repos immediately after adding'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  add-repos:
+    name: Add Repos
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "void-archive@noreply"
+          git config --global user.name "void-archive"
+          git config --global credential.helper ""
+          git config --global core.askPass ""
+
+      # ── Add URLs to repos.txt ─────────────────────────────────
+      - name: Add repos to list
+        env:
+          ADD_REPOS: ${{ github.event.inputs.urls }}
+        run: |
+          ADDED=0
+          SKIPPED=0
+
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            if grep -qF "$url" repos.txt; then
+              echo "⏭️  Already exists: $(basename $url .git)"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+            echo "$url" >> repos.txt
+            echo "➕ Added: $(basename $url .git)"
+            ADDED=$((ADDED + 1))
+          done <<< "$(echo "$ADD_REPOS" | python3 scripts/split-urls.py)"
+
+          echo ""
+          echo "📊 Added: $ADDED  Skipped (duplicate): $SKIPPED"
+
+          if [ "$ADDED" -gt 0 ]; then
+            git add repos.txt
+            git commit -m "repos: add $ADDED new repo(s)"
+            git push
+            echo "✅ repos.txt committed"
+            # Save added URLs for sync step
+            echo "$ADD_REPOS" | python3 scripts/split-urls.py > /tmp/newly-added.txt
+          else
+            echo "nothing-added" > /tmp/newly-added.txt
+          fi
+
+      # ── Sync newly added repos (if requested) ─────────────────
+      - name: Sync newly added repos
+        if: ${{ github.event.inputs.sync_after == 'true' }}
+        env:
+          REMOTE_TOKEN:  ${{ secrets.REMOTE_TOKEN }}
+          REMOTE_URL:    ${{ secrets.REMOTE_URL }}
+          PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
+          REPOS_FILE:    /tmp/newly-added.txt
+          GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
+          FORCE_FULL:    "true"   # new repos always need full sync
+        run: |
+          if [ ! -s /tmp/newly-added.txt ] || grep -q "nothing-added" /tmp/newly-added.txt; then
+            echo "⏭️  Nothing new to sync"
+            exit 0
+          fi
+
+          echo "📋 Repos to sync:"
+          cat /tmp/newly-added.txt
+
+          chmod +x scripts/sync.sh
+          bash scripts/sync.sh || true
+
+      # ── Generate README ───────────────────────────────────────
+      - name: Generate README
+        if: ${{ github.event.inputs.sync_after == 'true' }}
+        env:
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
+          REMOTE_URL:       ${{ secrets.REMOTE_URL }}
+          PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
+          PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
+          STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+          REPOS_FILE:       repos.txt
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          README_ONLY:      "false"
+        run: |
+          git checkout repos.txt 2>/dev/null || true
+          chmod +x scripts/generate-readme.sh
+          bash scripts/generate-readme.sh
+
+      # ── Upload log ───────────────────────────────────────────
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: add-repos-log-${{ github.run_id }}
+          path: /tmp/sync.log
+          retention-days: 30
+
+      - name: Print log
+        if: always()
+        run: cat /tmp/sync.log || true

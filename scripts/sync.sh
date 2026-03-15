@@ -1,13 +1,4 @@
 #!/bin/bash
-# =============================================================
-#  void-archive — sync.sh
-#  Syncs selected OSS repos to a remote git host
-#  - Checks latest commit SHA via API before cloning
-#  - Skips repos with no new commits since last sync
-#  - Fetches only branches + tags (no PR/issue refs)
-#  - Retries on network failure with 0.5s API cooldown
-#  - Suppresses verbose git output
-# =============================================================
 
 set -euo pipefail
 
@@ -21,10 +12,14 @@ export GIT_ASKPASS=/bin/false
 : "${REPOS_FILE:?❌  REPOS_FILE is not set}"
 : "${GITHUB_TOKEN:?❌  GITHUB_TOKEN is not set}"
 
+# ── Optional ──────────────────────────────────────────────────
+FORCE_FULL="${FORCE_FULL:-false}"
+
 # ── Internal config ───────────────────────────────────────────
 WORK_DIR="/tmp/void-work"
 LOG_FILE="/tmp/sync.log"
 RESULTS_FILE="/tmp/sync-results.json"
+PREV_STATE="/tmp/prev-state.json"
 MAX_RETRIES=3
 RETRY_DELAY=10
 API_COOLDOWN=0.5
@@ -68,9 +63,7 @@ with_retry() {
   return 1
 }
 
-# ── Check latest commit SHA via GitHub API ────────────────────
-# Returns SHA or empty string on failure
-# Cooldown applied to avoid rate limiting
+# ── Get latest commit SHA from GitHub API ─────────────────────
 get_latest_sha() {
   local owner="$1"
   local repo="$2"
@@ -96,6 +89,23 @@ try:
         print(data[0].get('sha', ''))
     else:
         print('')
+except Exception:
+    print('')
+" 2>/dev/null || echo ""
+}
+
+# ── Get last known SHA from previous state ────────────────────
+get_last_sha() {
+  local url="$1"
+
+  [ ! -f "$PREV_STATE" ] && echo "" && return 0
+
+  python3 -c "
+import json
+try:
+    with open('$PREV_STATE') as f:
+        state = json.load(f)
+    print(state.get('$url', {}).get('last_commit_sha', ''))
 except Exception:
     print('')
 " 2>/dev/null || echo ""
@@ -150,33 +160,33 @@ except Exception:
 # ── Sync a single repo ────────────────────────────────────────
 sync_repo() {
   local source_url="$1"
-  local last_sha="${2:-}"   # SHA from state.json, empty if first time
-
   local repo_name
   repo_name=$(basename "$source_url" .git)
-
-  # Extract owner/repo from URL
   local owner
   owner=$(echo "$source_url" | sed 's|https://github.com/||' | cut -d/ -f1)
-
   local work_dir="$WORK_DIR/$repo_name"
   local dest_url
   dest_url="${REMOTE_URL/https:\/\//https://oauth2:${REMOTE_TOKEN}@}/${PARENT_FOLDER}/${repo_name}.git"
 
   log "⏳ $repo_name"
 
-  # ── Check latest SHA before cloning ──────────────────────────
-  local current_sha
-  current_sha=$(get_latest_sha "$owner" "$repo_name")
+  # ── SHA check (skipped if FORCE_FULL=true) ───────────────────
+  local current_sha=""
+  local last_sha=""
 
-  if [ -n "$current_sha" ] && [ -n "$last_sha" ] && [ "$current_sha" = "$last_sha" ]; then
-    log "⏭️  $repo_name — no changes since last sync"
-    echo "skipped:0:0:0:—:0:0:0:${current_sha}"
-    return 0
-  fi
+  if [ "$FORCE_FULL" = "true" ]; then
+    log "   🔁 Force full sync — skipping SHA check"
+  else
+    current_sha=$(get_latest_sha "$owner" "$repo_name")
+    last_sha=$(get_last_sha "$source_url")
 
-  if [ -z "$current_sha" ]; then
-    log "   ⚠️  Could not fetch SHA — proceeding with sync"
+    if [ -n "$current_sha" ] && [ -n "$last_sha" ] && [ "$current_sha" = "$last_sha" ]; then
+      log "⏭️  $repo_name — no changes since last sync"
+      echo "skipped:0:0:0:—:0:0:0:${current_sha}"
+      return 0
+    fi
+
+    [ -z "$current_sha" ] && log "   ⚠️  Could not fetch SHA — proceeding anyway"
   fi
 
   # ── Ensure destination repo exists ───────────────────────────
@@ -188,7 +198,7 @@ sync_repo() {
 
   mkdir -p "$work_dir"
 
-  # ── Fetch only branches + tags (no PR/issue refs) ─────────
+  # ── Fetch only branches + tags ────────────────────────────────
   local clone_start clone_end clone_time
   clone_start=$(date +%s)
 
@@ -209,9 +219,8 @@ sync_repo() {
   clone_end=$(date +%s)
   clone_time=$((clone_end - clone_start))
 
-  # ── Measure repo size ─────────────────────────────────────────
-  local repo_size
-  local repo_size_bytes
+  # ── Repo metrics ──────────────────────────────────────────────
+  local repo_size repo_size_bytes branch_count tag_count
   repo_size_bytes=$(du -sb "$work_dir" 2>/dev/null | cut -f1 || echo 0)
   repo_size=$(python3 -c "
 s = $repo_size_bytes
@@ -220,16 +229,12 @@ elif s < 1048576: print(f'{s/1024:.1f} KB')
 elif s < 1073741824: print(f'{s/1048576:.1f} MB')
 else: print(f'{s/1073741824:.2f} GB')
 ")
-
-  # ── Count branches and tags ───────────────────────────────────
-  local branch_count tag_count
   cd "$work_dir"
   branch_count=$(git branch | wc -l | tr -d ' ')
   tag_count=$(git tag | wc -l | tr -d ' ')
 
-  # ── Push: branches and tags only ─────────────────────────────
-  local push_start push_end push_time
-  local retries=0
+  # ── Push: branches + tags only ────────────────────────────────
+  local push_start push_end push_time retries=0
   push_start=$(date +%s)
 
   local push_attempt=1
@@ -251,43 +256,25 @@ else: print(f'{s/1073741824:.2f} GB')
 
   push_end=$(date +%s)
   push_time=$((push_end - push_start))
+  local total_time=$((clone_time + push_time))
 
   cd /
   rm -rf "$work_dir"
 
   if [ "$push_ok" = false ]; then
     log "❌ $repo_name — push failed"
-    echo "failed:${clone_time}:${push_time}:$((clone_time+push_time)):${repo_size}:${branch_count}:${tag_count}:${retries}:${current_sha}"
+    echo "failed:${clone_time}:${push_time}:${total_time}:${repo_size}:${branch_count}:${tag_count}:${retries}:${current_sha}"
     return 1
   fi
 
-  local total_time=$((clone_time + push_time))
   log "✅ $repo_name (clone: ${clone_time}s push: ${push_time}s total: ${total_time}s size: $repo_size)"
   echo "success:${clone_time}:${push_time}:${total_time}:${repo_size}:${branch_count}:${tag_count}:${retries}:${current_sha}"
-}
-
-# ── Load last SHA from state.json ─────────────────────────────
-get_last_sha() {
-  local url="$1"
-  local state_file="/tmp/prev-state.json"
-
-  [ ! -f "$state_file" ] && echo "" && return 0
-
-  python3 -c "
-import json, sys
-try:
-    with open('$state_file') as f:
-        state = json.load(f)
-    print(state.get('$url', {}).get('last_commit_sha', ''))
-except Exception:
-    print('')
-" 2>/dev/null || echo ""
 }
 
 # ── Main ──────────────────────────────────────────────────────
 main() {
   hr
-  log "🚀 void-archive sync started"
+  log "🚀 void-archive sync started (force_full: $FORCE_FULL)"
   hr
 
   if [ ! -f "$REPOS_FILE" ]; then
@@ -306,10 +293,7 @@ main() {
 
     url="${line%% *}"
 
-    # Get last known SHA from previous state
-    last_sha=$(get_last_sha "$url")
-
-    result=$(sync_repo "$url" "$last_sha")
+    result=$(sync_repo "$url")
     STATUS=$(echo "$result"     | cut -d: -f1)
     CLONE_TIME=$(echo "$result" | cut -d: -f2)
     PUSH_TIME=$(echo "$result"  | cut -d: -f3)

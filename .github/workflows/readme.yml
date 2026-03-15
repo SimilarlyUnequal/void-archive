@@ -1,0 +1,44 @@
+name: void-archive — readme
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  readme:
+    name: Regenerate README
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "void-archive@noreply"
+          git config --global user.name "void-archive"
+          git config --global credential.helper ""
+          git config --global core.askPass ""
+
+      # ── Regenerate README from existing state ─────────────────
+      # Reads state.json from GitHub private repo (source of truth)
+      # Does NOT modify state.json — read only
+      # Pushes updated README.md to GitLab profile repo
+      - name: Generate README
+        env:
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
+          REMOTE_URL:       ${{ secrets.REMOTE_URL }}
+          PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
+          PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
+          STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+          REPOS_FILE:       repos.txt
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          README_ONLY:      "true"
+        run: |
+          chmod +x scripts/generate-readme.sh
+          bash scripts/generate-readme.sh

@@ -20,6 +20,7 @@ WORK_DIR="/tmp/void-work"
 LOG_FILE="/tmp/sync.log"
 RESULTS_FILE="/tmp/sync-results.json"
 PREV_STATE="/tmp/prev-state.json"
+LFS_FILE="lfs-repos.txt"
 MAX_RETRIES=3
 RETRY_DELAY=10
 API_COOLDOWN=0.5
@@ -28,7 +29,11 @@ API_COOLDOWN=0.5
 SUCCESS=0
 FAILED=0
 SKIPPED=0
+LFS_MOVED=0
 FAILED_REPOS=()
+
+# ── In-memory results dict (written to JSON at end via Python) ─
+RESULTS_DATA="{}"
 
 # ── Helpers ───────────────────────────────────────────────────
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
@@ -63,23 +68,53 @@ with_retry() {
   return 1
 }
 
-# ── Get latest commit SHA from GitHub API ─────────────────────
-get_latest_sha() {
-  local owner="$1"
-  local repo="$2"
-
+# ── GitHub API helper ─────────────────────────────────────────
+github_api() {
+  local endpoint="$1"
   sleep $API_COOLDOWN
-
-  local response
-  response=$(curl -sf \
+  curl -sf \
     --max-time 10 \
     --header "Authorization: Bearer $GITHUB_TOKEN" \
     --header "Accept: application/vnd.github+json" \
     --header "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/${owner}/${repo}/commits?per_page=1" 2>/dev/null) || {
-    echo ""
-    return 0
-  }
+    "https://api.github.com${endpoint}" 2>/dev/null || echo ""
+}
+
+# ── Detect LFS via GitHub API ─────────────────────────────────
+# Checks .gitattributes for lfs filter — no cloning needed
+has_lfs() {
+  local owner="$1"
+  local repo="$2"
+
+  local response
+  response=$(github_api "/repos/${owner}/${repo}/contents/.gitattributes")
+
+  [ -z "$response" ] && return 1
+
+  # Decode base64 content and check for lfs
+  echo "$response" | python3 -c "
+import sys, json, base64
+try:
+    data = json.load(sys.stdin)
+    content = base64.b64decode(data.get('content', '')).decode('utf-8', errors='ignore')
+    if 'lfs' in content.lower():
+        sys.exit(0)
+    else:
+        sys.exit(1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null
+}
+
+# ── Get latest commit SHA ─────────────────────────────────────
+get_latest_sha() {
+  local owner="$1"
+  local repo="$2"
+
+  local response
+  response=$(github_api "/repos/${owner}/${repo}/commits?per_page=1")
+
+  [ -z "$response" ] && echo "" && return 0
 
   echo "$response" | python3 -c "
 import sys, json
@@ -97,9 +132,7 @@ except Exception:
 # ── Get last known SHA from previous state ────────────────────
 get_last_sha() {
   local url="$1"
-
   [ ! -f "$PREV_STATE" ] && echo "" && return 0
-
   python3 -c "
 import json
 try:
@@ -109,6 +142,60 @@ try:
 except Exception:
     print('')
 " 2>/dev/null || echo ""
+}
+
+# ── Move repo from repos.txt to lfs-repos.txt ─────────────────
+move_to_lfs_file() {
+  local url="$1"
+
+  # Remove from repos.txt
+  local tmp
+  tmp=$(mktemp)
+  grep -vF "$url" "$REPOS_FILE" > "$tmp" || true
+  mv "$tmp" "$REPOS_FILE"
+
+  # Append to lfs-repos.txt if not already there
+  touch "$LFS_FILE"
+  if ! grep -qF "$url" "$LFS_FILE"; then
+    echo "$url" >> "$LFS_FILE"
+  fi
+}
+
+# ── Add result entry to in-memory dict ───────────────────────
+add_result() {
+  local url="$1"
+  local status="$2"
+  local clone_time="${3:-0}"
+  local push_time="${4:-0}"
+  local total_time="${5:-0}"
+  local repo_size="${6:-—}"
+  local branches="${7:-0}"
+  local tags="${8:-0}"
+  local retries="${9:-0}"
+  local commit_sha="${10:-}"
+
+  RESULTS_DATA=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {}
+data[sys.argv[2]] = {
+    'status':          sys.argv[3],
+    'clone_time':      int(sys.argv[4]),
+    'push_time':       int(sys.argv[5]),
+    'total_time':      int(sys.argv[6]),
+    'size':            sys.argv[7],
+    'branches':        int(sys.argv[8]) if sys.argv[8].isdigit() else 0,
+    'tags':            int(sys.argv[9]) if sys.argv[9].isdigit() else 0,
+    'retries':         int(sys.argv[10]),
+    'last_commit_sha': sys.argv[11],
+}
+print(json.dumps(data))
+" "$RESULTS_DATA" "$url" "$status" \
+    "$clone_time" "$push_time" "$total_time" \
+    "$repo_size" "$branches" "$tags" \
+    "$retries" "$commit_sha" 2>/dev/null) || true
 }
 
 # ── Remote API: ensure destination repo exists ────────────────
@@ -170,7 +257,24 @@ sync_repo() {
 
   log "⏳ $repo_name"
 
-  # ── SHA check (skipped if FORCE_FULL=true) ───────────────────
+  # ── LFS check ─────────────────────────────────────────────────
+  # Skip if already in lfs-repos.txt
+  touch "$LFS_FILE"
+  if grep -qF "$source_url" "$LFS_FILE"; then
+    log "⏭️  $repo_name — already in LFS exclusion list"
+    SKIPPED=$((SKIPPED + 1))
+    return 0
+  fi
+
+  # Check for LFS via API
+  if has_lfs "$owner" "$repo_name"; then
+    log "🗂️  $repo_name — LFS detected, moving to exclusion list"
+    move_to_lfs_file "$source_url"
+    LFS_MOVED=$((LFS_MOVED + 1))
+    return 0
+  fi
+
+  # ── SHA check ─────────────────────────────────────────────────
   local current_sha=""
   local last_sha=""
 
@@ -182,7 +286,8 @@ sync_repo() {
 
     if [ -n "$current_sha" ] && [ -n "$last_sha" ] && [ "$current_sha" = "$last_sha" ]; then
       log "⏭️  $repo_name — no changes since last sync"
-      echo "skipped:0:0:0:—:0:0:0:${current_sha}"
+      add_result "$source_url" "skipped" 0 0 0 "—" 0 0 0 "$current_sha"
+      SKIPPED=$((SKIPPED + 1))
       return 0
     fi
 
@@ -192,7 +297,7 @@ sync_repo() {
   # ── Ensure destination repo exists ───────────────────────────
   if ! ensure_remote_repo "$repo_name"; then
     log "❌ $repo_name — could not prepare destination"
-    echo "failed:0:0:0:—:0:0:0:${current_sha}"
+    add_result "$source_url" "failed" 0 0 0 "—" 0 0 0 "$current_sha"
     return 1
   fi
 
@@ -212,7 +317,7 @@ sync_repo() {
   ); then
     log "❌ $repo_name — fetch failed"
     rm -rf "$work_dir"
-    echo "failed:0:0:0:—:0:0:0:${current_sha}"
+    add_result "$source_url" "failed" 0 0 0 "—" 0 0 0 "$current_sha"
     return 1
   fi
 
@@ -263,12 +368,17 @@ else: print(f'{s/1073741824:.2f} GB')
 
   if [ "$push_ok" = false ]; then
     log "❌ $repo_name — push failed"
-    echo "failed:${clone_time}:${push_time}:${total_time}:${repo_size}:${branch_count}:${tag_count}:${retries}:${current_sha}"
+    add_result "$source_url" "failed" \
+      "$clone_time" "$push_time" "$total_time" \
+      "$repo_size" "$branch_count" "$tag_count" "$retries" "$current_sha"
     return 1
   fi
 
   log "✅ $repo_name (clone: ${clone_time}s push: ${push_time}s total: ${total_time}s size: $repo_size)"
-  echo "success:${clone_time}:${push_time}:${total_time}:${repo_size}:${branch_count}:${tag_count}:${retries}:${current_sha}"
+  add_result "$source_url" "success" \
+    "$clone_time" "$push_time" "$total_time" \
+    "$repo_size" "$branch_count" "$tag_count" "$retries" "$current_sha"
+  SUCCESS=$((SUCCESS + 1))
 }
 
 # ── Main ──────────────────────────────────────────────────────
@@ -283,61 +393,35 @@ main() {
   fi
 
   mkdir -p "$WORK_DIR"
+  touch "$LFS_FILE"
 
-  echo "{" > "$RESULTS_FILE"
-  FIRST_ENTRY=true
   TOTAL_START=$(date +%s)
 
-  while IFS= read -r line || [ -n "$line" ]; do
-    [[ "$line" =~ ^#.*$ || -z "${line// }" ]] && continue
+  # Read repos into array first — repos.txt may change during loop (LFS removal)
+  mapfile -t REPO_URLS < <(grep -v '^\s*#' "$REPOS_FILE" | grep -v '^\s*$' | grep '^http' || true)
 
-    url="${line%% *}"
-
-    result=$(sync_repo "$url")
-    STATUS=$(echo "$result"     | cut -d: -f1)
-    CLONE_TIME=$(echo "$result" | cut -d: -f2)
-    PUSH_TIME=$(echo "$result"  | cut -d: -f3)
-    TOTAL_TIME=$(echo "$result" | cut -d: -f4)
-    REPO_SIZE=$(echo "$result"  | cut -d: -f5)
-    BRANCHES=$(echo "$result"   | cut -d: -f6)
-    TAGS=$(echo "$result"       | cut -d: -f7)
-    RETRIES=$(echo "$result"    | cut -d: -f8)
-    COMMIT_SHA=$(echo "$result" | cut -d: -f9)
-
-    case "$STATUS" in
-      success) SUCCESS=$((SUCCESS + 1)) ;;
-      skipped) SKIPPED=$((SKIPPED + 1)) ;;
-      failed)
-        FAILED=$((FAILED + 1))
-        FAILED_REPOS+=("$(basename "$url" .git)")
-        ;;
-    esac
-
-    [ "$FIRST_ENTRY" = "true" ] && FIRST_ENTRY=false || echo "," >> "$RESULTS_FILE"
-    cat >> "$RESULTS_FILE" << JSON
-  "$url": {
-    "status": "$STATUS",
-    "clone_time": $CLONE_TIME,
-    "push_time": $PUSH_TIME,
-    "total_time": $TOTAL_TIME,
-    "size": "$REPO_SIZE",
-    "branches": $BRANCHES,
-    "tags": $TAGS,
-    "retries": $RETRIES,
-    "last_commit_sha": "$COMMIT_SHA"
-  }
-JSON
-
-  done < "$REPOS_FILE"
+  for url in "${REPO_URLS[@]}"; do
+    sync_repo "$url" || FAILED_REPOS+=("$(basename "$url" .git)")
+  done
 
   TOTAL_END=$(date +%s)
   TOTAL_RUN=$((TOTAL_END - TOTAL_START))
 
-  echo "" >> "$RESULTS_FILE"
-  echo "}" >> "$RESULTS_FILE"
+  # ── Write results JSON via Python (safe escaping) ─────────────
+  echo "$RESULTS_DATA" | python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    with open('$RESULTS_FILE', 'w') as f:
+        json.dump(data, f, indent=2)
+    print('✅ Results written')
+except Exception as e:
+    print(f'❌ Results write error: {e}', file=sys.stderr)
+    sys.exit(1)
+"
 
   hr
-  log "📊 Done — ✅ $SUCCESS synced  ⏭️  $SKIPPED skipped  ❌ $FAILED failed  ⏱️  ${TOTAL_RUN}s"
+  log "📊 Done — ✅ $SUCCESS synced  ⏭️  $SKIPPED skipped  🗂️  $LFS_MOVED moved to LFS list  ❌ ${#FAILED_REPOS[@]} failed  ⏱️  ${TOTAL_RUN}s"
 
   if [ ${#FAILED_REPOS[@]} -gt 0 ]; then
     log "🔴 Failed:"
@@ -345,9 +429,13 @@ JSON
       log "   - $r"
     done
   fi
+
+  if [ "$LFS_MOVED" -gt 0 ]; then
+    log "🗂️  Moved to LFS exclusion list — will be committed by workflow"
+  fi
   hr
 
-  if [ "$FAILED" -gt 0 ]; then exit 1; else exit 0; fi
+  if [ "${#FAILED_REPOS[@]}" -gt 0 ]; then exit 1; else exit 0; fi
 }
 
 main

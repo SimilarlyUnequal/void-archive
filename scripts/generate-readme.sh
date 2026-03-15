@@ -1,13 +1,4 @@
 #!/bin/bash
-# =============================================================
-#  void-archive — generate-readme.sh
-#  Generates a dashboard README.md for the remote group page
-#  - Reads state.json from GitLab profile repo
-#  - Merges /tmp/sync-results.json if exists (sync mode)
-#  - Backs up state.json to GitHub private repo
-#  - readme-only mode: reads from GitHub private state repo
-#  - All JSON ops wrapped in try/except
-# =============================================================
 
 set -euo pipefail
 
@@ -87,7 +78,7 @@ except Exception:
   sleep 2
 }
 
-# ── Clone or init a git repo ──────────────────────────────────
+# ── Clone or init ─────────────────────────────────────────────
 clone_or_init() {
   local dir="$1"
   local remote="$2"
@@ -113,15 +104,15 @@ clone_or_init() {
 # ── Merge sync results into state ────────────────────────────
 merge_results() {
   local state_file="$1"
+  local results_file="$2"
 
-  python3 - "$state_file" "$RESULTS_FILE" "$TODAY" << 'PYEOF'
+  python3 - "$state_file" "$results_file" "$TODAY" << 'PYEOF'
 import json, sys
 
 state_file   = sys.argv[1]
 results_file = sys.argv[2]
 today        = sys.argv[3]
 
-# Load state safely
 try:
     with open(state_file) as f:
         state = json.load(f)
@@ -129,7 +120,6 @@ except (json.JSONDecodeError, FileNotFoundError, Exception) as e:
     print(f"[merge] state load warning: {e} — starting fresh", file=sys.stderr)
     state = {}
 
-# Load results safely
 try:
     with open(results_file) as f:
         results = json.load(f)
@@ -141,7 +131,6 @@ for url, metrics in results.items():
     existing = state.get(url, {})
     status   = metrics.get("status", "failed")
 
-    # Preserve first_synced
     if "first_synced" not in existing:
         existing["first_synced"] = today
 
@@ -149,14 +138,12 @@ for url, metrics in results.items():
     existing["status"]       = status
     existing["topics"]       = existing.get("topics", None)
 
-    # Always update SHA regardless of status
     sha = metrics.get("last_commit_sha", "")
     if sha:
         existing["last_commit_sha"] = sha
 
     if status == "skipped":
-        # Keep all previous values — nothing changed
-        pass
+        pass  # keep all previous values unchanged
     elif status == "success":
         existing["last_success"] = today
         existing["clone_time"]   = metrics.get("clone_time", 0)
@@ -167,11 +154,10 @@ for url, metrics in results.items():
         existing["tags"]         = metrics.get("tags", 0)
         existing["retries"]      = metrics.get("retries", 0)
     else:
-        # failed — update attempt fields only
-        existing["clone_time"] = metrics.get("clone_time", 0)
-        existing["push_time"]  = metrics.get("push_time", 0)
-        existing["total_time"] = metrics.get("total_time", 0)
-        existing["retries"]    = metrics.get("retries", 0)
+        existing["clone_time"]   = metrics.get("clone_time", 0)
+        existing["push_time"]    = metrics.get("push_time", 0)
+        existing["total_time"]   = metrics.get("total_time", 0)
+        existing["retries"]      = metrics.get("retries", 0)
 
     state[url] = existing
 
@@ -190,7 +176,7 @@ fetch_topics() {
   local state_file="$1"
 
   python3 - "$state_file" "$REPOS_FILE" << PYEOF
-import json, sys, urllib.request, urllib.error
+import json, sys, urllib.request
 
 state_file   = sys.argv[1]
 repos_file   = sys.argv[2]
@@ -199,7 +185,7 @@ github_token = "$GITHUB_TOKEN"
 try:
     with open(state_file) as f:
         state = json.load(f)
-except (json.JSONDecodeError, FileNotFoundError, Exception) as e:
+except Exception as e:
     print(f"[topics] state load error: {e}", file=sys.stderr)
     state = {}
 
@@ -267,7 +253,7 @@ next_sunday = sys.argv[6]
 try:
     with open(state_file) as f:
         state = json.load(f)
-except (json.JSONDecodeError, FileNotFoundError, Exception) as e:
+except Exception as e:
     print(f"[readme] state load error: {e} — using empty state", file=sys.stderr)
     state = {}
 
@@ -278,7 +264,6 @@ except Exception as e:
     print(f"[readme] repos file error: {e}", file=sys.stderr)
     sys.exit(1)
 
-# ── Parse repos.txt ───────────────────────────────────────────
 current_category = None
 url_category     = {}
 all_urls         = []
@@ -310,8 +295,8 @@ def get_category(url):
 def fmt_time(secs):
     try:
         secs = int(secs)
-        if secs == 0:   return "—"
-        if secs < 60:   return f"{secs}s"
+        if secs == 0:  return "—"
+        if secs < 60:  return f"{secs}s"
         return f"{secs//60}m {secs%60}s"
     except Exception:
         return "—"
@@ -320,7 +305,6 @@ categories = defaultdict(list)
 for url in all_urls:
     categories[get_category(url)].append(url)
 
-# ── Stats ─────────────────────────────────────────────────────
 total   = len(all_urls)
 success = sum(1 for u in all_urls if state.get(u, {}).get("status") == "success")
 skipped = sum(1 for u in all_urls if state.get(u, {}).get("status") == "skipped")
@@ -329,21 +313,13 @@ pending = total - success - skipped - failed
 
 total_sync_time = sum(
     state.get(u, {}).get("total_time", 0) or 0
-    for u in all_urls
-    if state.get(u, {}).get("status") == "success"
+    for u in all_urls if state.get(u, {}).get("status") == "success"
 )
-
-timed = [
-    (u, state.get(u, {}).get("total_time", 0) or 0)
-    for u in all_urls
-    if state.get(u, {}).get("status") == "success"
-]
+timed   = [(u, state.get(u,{}).get("total_time",0) or 0) for u in all_urls if state.get(u,{}).get("status")=="success"]
 slowest = max(timed, key=lambda x: x[1], default=None)
 fastest = min(timed, key=lambda x: x[1], default=None)
 
 out = []
-
-# ── Header ────────────────────────────────────────────────────
 out.append("# 🪐 void-archive\n\n")
 out.append("> A curated backup of essential open source projects.\n\n")
 out.append("| | |\n|---|---|\n")
@@ -357,7 +333,6 @@ if fastest:
     fname = fastest[0].rstrip('/').split('/')[-1]
     out.append(f"| 🐇 Fastest | {fname} ({fmt_time(fastest[1])}) |\n")
 out.append("\n")
-
 out.append(
     f"![total](https://img.shields.io/badge/total-{total}-blue) "
     f"![synced](https://img.shields.io/badge/synced-{success}-brightgreen) "
@@ -366,14 +341,12 @@ out.append(
     f"![pending](https://img.shields.io/badge/pending-{pending}-yellow)\n\n"
 )
 
-# ── Table of contents ─────────────────────────────────────────
 out.append("## Contents\n\n")
 for cat in sorted(categories.keys()):
     anchor = cat.lower().replace(" ", "-")
     out.append(f"- [{cat}](#{anchor}) ({len(categories[cat])})\n")
 out.append("\n")
 
-# ── Category tables ───────────────────────────────────────────
 for cat in sorted(categories.keys()):
     out.append(f"## {cat}\n\n")
     out.append(
@@ -384,12 +357,11 @@ for cat in sorted(categories.keys()):
         "|------|--------|-------------|-------------|------|"
         "----------|------|-------|------|-------|---------|--------|\n"
     )
-
     for url in categories[cat]:
-        name   = url.rstrip("/").split("/")[-1].replace(".git", "")
-        info   = state.get(url, {})
-        status = info.get("status", "pending")
-        topics = info.get("topics") or []
+        name         = url.rstrip("/").split("/")[-1].replace(".git", "")
+        info         = state.get(url, {})
+        status       = info.get("status", "pending")
+        topics       = info.get("topics") or []
         topic_str    = " ".join(f"<code>{t}</code>" for t in topics[:3]) if topics else "—"
         first_synced = info.get("first_synced", "—")
         last_success = info.get("last_success") or "—"
@@ -402,18 +374,14 @@ for cat in sorted(categories.keys()):
         retries      = info.get("retries", 0)
 
         if status == "success":
-            badge    = "✅"
-            date_str = last_success
+            badge = "✅"; date_str = last_success
         elif status == "skipped":
-            badge    = "⏭️"
-            date_str = last_success
+            badge = "⏭️"; date_str = last_success
             clone_t = push_t = total_t = "—"
         elif status == "failed":
-            badge    = "❌"
-            date_str = f"last ok: {last_success}"
+            badge = "❌"; date_str = f"last ok: {last_success}"
         else:
-            badge    = "⏳"
-            date_str = "—"
+            badge = "⏳"; date_str = "—"
             clone_t = push_t = total_t = "—"
 
         out.append(
@@ -421,7 +389,6 @@ for cat in sorted(categories.keys()):
             f" {size} | {branches} | {tags} | {clone_t} | {push_t} | {total_t} |"
             f" {retries} | {badge} |\n"
         )
-
     out.append("\n")
 
 out.append("---\n\n*Auto-generated — do not edit manually.*\n")
@@ -459,6 +426,23 @@ commit_and_push() {
   cd /
 }
 
+# ── Backup state + results to GitHub private repo ────────────
+backup_to_state_repo() {
+  local state_file="$1"
+
+  log "💾 Backing up to private repo..."
+  clone_or_init "$STATE_WORK" "$STATE_REMOTE" "state backup"
+  cp "$state_file" "$STATE_WORK/state.json"
+
+  # Also backup raw results if available
+  if [ -f "$RESULTS_FILE" ]; then
+    cp "$RESULTS_FILE" "$STATE_WORK/sync-results.json"
+  fi
+
+  commit_and_push "$STATE_WORK" "state: $TODAY"
+  log "✅ Backed up state.json + sync-results.json"
+}
+
 # ── Main ──────────────────────────────────────────────────────
 main() {
   log "📝 Starting README generation (mode: ${README_ONLY})"
@@ -482,7 +466,7 @@ main() {
     cp "$state_file" "$GITLAB_WORK/state.json"
 
   else
-    # ── Sync mode: get state from GitLab, merge results ────────
+    # ── Sync mode ──────────────────────────────────────────────
     clone_or_init "$GITLAB_WORK" "$PROFILE_REMOTE" "profile repo"
     state_file="$GITLAB_WORK/state.json"
 
@@ -490,7 +474,20 @@ main() {
 
     if [ -f "$RESULTS_FILE" ]; then
       log "🔀 Merging sync results..."
-      merge_results "$state_file"
+      if ! merge_results "$state_file" "$RESULTS_FILE"; then
+        # ── Fallback: try backed-up results from private repo ──
+        log "⚠️  Merge failed — trying fallback from private backup..."
+        clone_or_init "$STATE_WORK" "$STATE_REMOTE" "state backup"
+
+        if [ -f "$STATE_WORK/sync-results.json" ]; then
+          log "📥 Using backed-up sync-results.json"
+          merge_results "$state_file" "$STATE_WORK/sync-results.json" || {
+            log "❌ Fallback merge also failed — generating README from existing state only"
+          }
+        else
+          log "⚠️  No backup results found — generating README from existing state only"
+        fi
+      fi
     else
       log "⚠️  No sync results — using existing state"
     fi
@@ -498,12 +495,7 @@ main() {
     log "🏷️  Fetching topics..."
     fetch_topics "$state_file" || log "⚠️  Topics fetch failed — continuing"
 
-    # ── Back up state to GitHub private repo ───────────────────
-    log "💾 Backing up state..."
-    clone_or_init "$STATE_WORK" "$STATE_REMOTE" "state backup"
-    cp "$state_file" "$STATE_WORK/state.json"
-    commit_and_push "$STATE_WORK" "state: $TODAY"
-    log "✅ State backed up"
+    backup_to_state_repo "$state_file"
   fi
 
   log "📄 Generating README..."

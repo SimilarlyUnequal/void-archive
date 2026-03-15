@@ -39,36 +39,64 @@ jobs:
         env:
           ADD_REPOS: ${{ github.event.inputs.urls }}
         run: |
+          touch lfs-repos.txt
           ADDED=0
           SKIPPED=0
+          LFS_BLOCKED=0
 
           while IFS= read -r url; do
             [ -z "$url" ] && continue
+
+            # Skip if already in lfs exclusion list
+            if grep -qF "$url" lfs-repos.txt; then
+              echo "🗂️  LFS excluded: $(basename $url .git)"
+              LFS_BLOCKED=$((LFS_BLOCKED + 1))
+              continue
+            fi
+
+            # Skip if already in repos.txt
             if grep -qF "$url" repos.txt; then
               echo "⏭️  Already exists: $(basename $url .git)"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
+
             echo "$url" >> repos.txt
             echo "➕ Added: $(basename $url .git)"
             ADDED=$((ADDED + 1))
           done <<< "$(echo "$ADD_REPOS" | python3 scripts/split-urls.py)"
 
           echo ""
-          echo "📊 Added: $ADDED  Skipped (duplicate): $SKIPPED"
+          echo "📊 Added: $ADDED  Skipped: $SKIPPED  LFS blocked: $LFS_BLOCKED"
 
           if [ "$ADDED" -gt 0 ]; then
             git add repos.txt
             git commit -m "repos: add $ADDED new repo(s)"
             git push
             echo "✅ repos.txt committed"
-            # Save added URLs for sync step
             echo "$ADD_REPOS" | python3 scripts/split-urls.py > /tmp/newly-added.txt
           else
-            echo "nothing-added" > /tmp/newly-added.txt
+            echo "" > /tmp/newly-added.txt
           fi
 
-      # ── Sync newly added repos (if requested) ─────────────────
+      # ── Fetch previous state ──────────────────────────────────
+      - name: Fetch previous state
+        if: ${{ github.event.inputs.sync_after == 'true' }}
+        env:
+          STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+        run: |
+          STATE_REMOTE="https://${STATE_REPO_TOKEN}@${STATE_REPO_URL#https://}"
+          if git clone "$STATE_REMOTE" /tmp/void-state 2>/dev/null; then
+            [ -f /tmp/void-state/state.json ] && \
+              cp /tmp/void-state/state.json /tmp/prev-state.json && \
+              echo "✅ Previous state loaded" || \
+              echo "⚠️  No state.json — first run"
+          else
+            echo "⚠️  Could not clone state repo"
+          fi
+
+      # ── Sync newly added repos ────────────────────────────────
       - name: Sync newly added repos
         if: ${{ github.event.inputs.sync_after == 'true' }}
         env:
@@ -77,18 +105,28 @@ jobs:
           PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
           REPOS_FILE:    /tmp/newly-added.txt
           GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
-          FORCE_FULL:    "true"   # new repos always need full sync
+          FORCE_FULL:    "true"
         run: |
-          if [ ! -s /tmp/newly-added.txt ] || grep -q "nothing-added" /tmp/newly-added.txt; then
+          if [ ! -s /tmp/newly-added.txt ]; then
             echo "⏭️  Nothing new to sync"
             exit 0
           fi
-
           echo "📋 Repos to sync:"
           cat /tmp/newly-added.txt
-
           chmod +x scripts/sync.sh
           bash scripts/sync.sh || true
+
+      # ── Commit lfs-repos.txt if LFS detected during sync ─────
+      - name: Commit lfs changes
+        if: ${{ github.event.inputs.sync_after == 'true' }}
+        run: |
+          git add repos.txt lfs-repos.txt 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "📋 No LFS changes"
+          else
+            git commit -m "sync: update repo lists after add"
+            git push
+          fi
 
       # ── Generate README ───────────────────────────────────────
       - name: Generate README

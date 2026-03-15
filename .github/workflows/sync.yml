@@ -2,7 +2,7 @@ name: void-archive — sync
 
 on:
   schedule:
-    - cron: '0 0 * * 0'   # Every Sunday 12:00 AM UTC
+    - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
       specific_repo:
@@ -16,7 +16,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   sync:
@@ -66,6 +66,8 @@ jobs:
           SINGLE_REPO:   ${{ github.event.inputs.specific_repo }}
           IS_MANUAL:     ${{ github.event_name == 'workflow_dispatch' }}
         run: |
+          touch lfs-repos.txt
+
           if [ "$IS_MANUAL" = "true" ] && [ -n "$SINGLE_REPO" ]; then
             echo "🎯 Single repo mode"
             echo "$SINGLE_REPO" > repos.txt
@@ -79,6 +81,18 @@ jobs:
 
           chmod +x scripts/sync.sh
           bash scripts/sync.sh || true
+
+      # ── Commit repos.txt + lfs-repos.txt if changed ──────────
+      - name: Commit file changes
+        run: |
+          git add repos.txt lfs-repos.txt 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "📋 No file changes to commit"
+          else
+            git commit -m "sync: update repo lists"
+            git push
+            echo "✅ Committed repos.txt + lfs-repos.txt"
+          fi
 
       # ── Generate README ───────────────────────────────────────
       - name: Generate README

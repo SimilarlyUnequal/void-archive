@@ -13,6 +13,11 @@ on:
         description: 'ADD: New URLs to add (one per line, duplicates ignored)'
         required: false
         default: ''
+      skip_sync:
+        description: 'README only: skip sync, regenerate README from existing state'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -35,9 +40,9 @@ jobs:
           git config --global credential.helper ""
           git config --global core.askPass ""
 
-      # ── Add new repos to repos.txt if provided ───────────────
+      # ── Add new repos to repos.txt ───────────────────────────
       - name: Add repos to list
-        if: ${{ github.event.inputs.add_repos != '' }}
+        if: ${{ github.event.inputs.add_repos != '' && github.event.inputs.skip_sync != 'true' }}
         env:
           ADD_REPOS: ${{ github.event.inputs.add_repos }}
         run: |
@@ -64,8 +69,30 @@ jobs:
             git push
           fi
 
+      # ── Fetch previous state for SHA comparison ───────────────
+      # Pulls state.json from GitHub private repo so sync.sh
+      # can skip repos that have not changed since last run
+      - name: Fetch previous state
+        if: ${{ github.event.inputs.skip_sync != 'true' }}
+        env:
+          STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+        run: |
+          STATE_REMOTE="https://${STATE_REPO_TOKEN}@${STATE_REPO_URL#https://}"
+          if git clone "$STATE_REMOTE" /tmp/void-state 2>/dev/null; then
+            if [ -f /tmp/void-state/state.json ]; then
+              cp /tmp/void-state/state.json /tmp/prev-state.json
+              echo "✅ Previous state loaded"
+            else
+              echo "⚠️  No state.json in backup — first run"
+            fi
+          else
+            echo "⚠️  Could not clone state repo — first run"
+          fi
+
       # ── Run sync ─────────────────────────────────────────────
       - name: Run sync
+        if: ${{ github.event.inputs.skip_sync != 'true' }}
         env:
           REMOTE_TOKEN:  ${{ secrets.REMOTE_TOKEN }}
           REMOTE_URL:    ${{ secrets.REMOTE_URL }}
@@ -74,9 +101,9 @@ jobs:
           SINGLE_REPO:   ${{ github.event.inputs.specific_repo }}
           ADD_REPOS:     ${{ github.event.inputs.add_repos }}
           IS_MANUAL:     ${{ github.event_name == 'workflow_dispatch' }}
+          GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "$IS_MANUAL" = "true" ]; then
-
             if [ -n "$SINGLE_REPO" ]; then
               echo "🎯 Single repo mode: provided URL"
               echo "$SINGLE_REPO" > repos.txt
@@ -92,7 +119,6 @@ jobs:
               FIRST=$(grep -v '^\s*#' repos.txt | grep -v '^\s*$' | head -n 1)
               echo "$FIRST" > repos.txt
             fi
-
           else
             echo "📋 Scheduled run — using full repos.txt"
           fi
@@ -100,16 +126,19 @@ jobs:
           chmod +x scripts/sync.sh
           bash scripts/sync.sh || true
 
-      # ── Generate group README ─────────────────────────────────
+      # ── Generate README ───────────────────────────────────────
       - name: Generate README
         if: always()
         env:
-          REMOTE_TOKEN:  ${{ secrets.REMOTE_TOKEN }}
-          REMOTE_URL:    ${{ secrets.REMOTE_URL }}
-          PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
-          PROFILE_REPO:  ${{ secrets.PROFILE_REPO }}
-          REPOS_FILE:    repos.txt
-          GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
+          REMOTE_URL:       ${{ secrets.REMOTE_URL }}
+          PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
+          PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
+          STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+          REPOS_FILE:       repos.txt
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          README_ONLY:      ${{ github.event.inputs.skip_sync == 'true' && 'true' || 'false' }}
         run: |
           git checkout repos.txt 2>/dev/null || true
           chmod +x scripts/generate-readme.sh

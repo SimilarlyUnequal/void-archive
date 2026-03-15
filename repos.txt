@@ -1,7 +1,6 @@
 https://github.com/C4illin/ConvertX
 https://github.com/hcengineering/platform
 https://github.com/louislam/uptime-kuma
-https://github.com/home-assistant/core
 https://github.com/syncthing/syncthing
 https://github.com/docmost/docmost
 https://github.com/bitwarden/

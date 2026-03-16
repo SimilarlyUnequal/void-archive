@@ -5,12 +5,17 @@ on:
     - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
-      specific_repo:
-        description: 'Single URL to test (empty = first repo in list)'
-        required: false
-        default: ''
+      mode:
+        description: 'Run mode'
+        type: choice
+        required: true
+        default: single
+        options:
+          - single    # test single repo from test.yml
+          - group     # test group repo from test.yml
+          - full      # sync all repos (same as scheduled)
       force_full:
-        description: 'Force full clone — ignore SHA check, re-sync everything'
+        description: 'Force full clone — ignore SHA check'
         type: boolean
         required: false
         default: false
@@ -27,7 +32,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v4
 
       - name: Configure Git
         run: |
@@ -51,51 +56,56 @@ jobs:
               cp /tmp/void-state/state.json /tmp/prev-state.json
               echo "✅ Previous state loaded"
             else
-              echo "⚠️  No state.json found — first run"
+              echo "⚠️  No state.json — first run"
             fi
           else
             echo "⚠️  Could not clone state repo — first run"
           fi
 
+      # ── Prepare repos file based on mode ─────────────────────
+      - name: Prepare repos file
+        env:
+          MODE:     ${{ github.event.inputs.mode || 'full' }}
+          IS_SCHED: ${{ github.event_name == 'schedule' }}
+        run: |
+          if [ "$IS_SCHED" = "true" ] || [ "$MODE" = "full" ]; then
+            echo "📋 Full mode — using repos.yml"
+            echo "SYNC_REPOS=repos.yml" >> $GITHUB_ENV
+
+          elif [ "$MODE" = "single" ]; then
+            echo "🎯 Single test mode"
+            python3 scripts/python/parse-test.py test.yml single
+            echo "SYNC_REPOS=/tmp/test-repos.yml" >> $GITHUB_ENV
+
+          elif [ "$MODE" = "group" ]; then
+            echo "🎯 Group test mode"
+            python3 scripts/python/parse-test.py test.yml group
+            echo "SYNC_REPOS=/tmp/test-repos.yml" >> $GITHUB_ENV
+          fi
+
       # ── Run sync ─────────────────────────────────────────────
       - name: Run sync
         env:
-          REMOTE_TOKEN:  ${{ secrets.REMOTE_TOKEN }}
-          REMOTE_URL:    ${{ secrets.REMOTE_URL }}
-          PARENT_FOLDER: ${{ secrets.PARENT_FOLDER }}
-          REPOS_FILE:     repos.yml
-          GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
-          FORCE_FULL:        ${{ github.event.inputs.force_full == 'true' && 'true' || 'false' }}
-          SINGLE_REPO:       ${{ github.event.inputs.specific_repo }}
-          IS_MANUAL:         ${{ github.event_name == 'workflow_dispatch' }}
-          GITHUB_WORKSPACE:  ${{ github.workspace }}
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
+          REMOTE_URL:       ${{ secrets.REMOTE_URL }}
+          PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
+          REPOS_FILE:       ${{ env.SYNC_REPOS }}
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          FORCE_FULL:       ${{ github.event.inputs.force_full == 'true' && 'true' || 'false' }}
         run: |
-          touch "$GITHUB_WORKSPACE/lfs-repos.txt"
-
-          if [ "$IS_MANUAL" = "true" ] && [ -n "$SINGLE_REPO" ]; then
-            echo "🎯 Single repo mode"
-            echo "$SINGLE_REPO" > repos.txt
-          elif [ "$IS_MANUAL" = "true" ] && [ -z "$SINGLE_REPO" ] && [ "$FORCE_FULL" != "true" ]; then
-            echo "🎯 First repo mode"
-            FIRST=$(grep -v '^\s*#' repos.txt | grep -v '^\s*$' | head -n 1)
-            echo "$FIRST" > repos.txt
-          else
-            echo "📋 Full repos.txt"
-          fi
-
           chmod +x scripts/sync.sh
           bash scripts/sync.sh || true
 
-      # ── Commit repos.txt + lfs-repos.txt if changed ──────────
+      # ── Commit repos.yml + lfs-repos.txt if changed ──────────
       - name: Commit file changes
         run: |
-          git add repos.txt lfs-repos.txt 2>/dev/null || true
+          git add repos.yml lfs-repos.txt 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo "📋 No file changes to commit"
+            echo "📋 No file changes"
           else
             git commit -m "sync: update repo lists"
             git push
-            echo "✅ Committed repos.txt + lfs-repos.txt"
           fi
 
       # ── Generate README ───────────────────────────────────────
@@ -108,7 +118,7 @@ jobs:
           PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
           STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
           STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
-          REPOS_FILE:     repos.yml
+          REPOS_FILE:       repos.yml
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
           README_ONLY:      "false"
         run: |
@@ -117,12 +127,14 @@ jobs:
           bash scripts/generate-readme.sh
 
       # ── Upload log ───────────────────────────────────────────
-      - name: Upload log
+      - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v6.0.0
+        uses: actions/upload-artifact@v4
         with:
           name: sync-log-${{ github.run_id }}
-          path: /tmp/sync.log
+          path: |
+            /tmp/sync.log
+            /tmp/sync-verbose.log
           retention-days: 30
 
       - name: Print log

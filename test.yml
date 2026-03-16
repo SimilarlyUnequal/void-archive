@@ -1,0 +1,6 @@
+single:
+  url: https://github.com/vaultwarden/vaultwarden
+
+group:
+  name: bitwarden
+  url: https://github.com/bitwarden/server

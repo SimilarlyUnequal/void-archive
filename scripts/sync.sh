@@ -3,8 +3,8 @@
 #  void-archive — sync.sh
 #  Syncs selected OSS repos to a remote git host
 #  - Reads repos.yml (grouped + ungrouped)
-#  - Creates GitLab subgroups automatically
-#  - Detects LFS via API before cloning — moves to lfs-repos.txt
+#  - Creates/transfers GitLab subgroups automatically
+#  - Detects LFS via API — moves to lfs-repos.txt
 #  - Checks latest commit SHA via API — skips unchanged repos
 #  - FORCE_FULL=true bypasses SHA check
 #  - Fetches only branches + tags (no PR/issue refs)
@@ -32,10 +32,12 @@ FORCE_FULL="${FORCE_FULL:-false}"
 # ── Resolve workspace paths ───────────────────────────────────
 REPOS_FILE="$(realpath "$REPOS_FILE")"
 LFS_FILE="${GITHUB_WORKSPACE}/lfs-repos.txt"
+PYTHON="python3 ${GITHUB_WORKSPACE}/scripts/python"
 
 # ── Internal config ───────────────────────────────────────────
 WORK_DIR="/tmp/void-work"
 LOG_FILE="/tmp/sync.log"
+VERBOSE_LOG="/tmp/sync-verbose.log"
 RESULTS_FILE="/tmp/sync-results.json"
 PREV_STATE="/tmp/prev-state.json"
 MAX_RETRIES=3
@@ -56,18 +58,30 @@ RESULTS_DATA="{}"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 hr()  { log "─────────────────────────────────────────────"; }
 
+# Console: suppressed clean output
+# Artifact: full verbose git output in /tmp/sync-verbose.log
 silent() {
-  local out
-  out=$("$@" 2>&1) || {
+  local out exit_code=0
+  out=$("$@" 2>&1) || exit_code=$?
+
+  # Always write full raw output to verbose log
+  if [ -n "$out" ]; then
+    echo "--- CMD: $* ---" >> "$VERBOSE_LOG"
+    echo "$out" >> "$VERBOSE_LOG"
+    echo "" >> "$VERBOSE_LOG"
+  fi
+
+  # On failure — show sanitized short error in console only
+  if [ $exit_code -ne 0 ]; then
     echo "$out" \
-      | sed 's|https\?://[^ ]*||g' \
+      | sed 's|https://[^ ]*||g' \
       | sed "s|$REMOTE_TOKEN|***|g" \
       | sed "s|$GITHUB_TOKEN|***|g" \
       | grep -v '^\s*$' \
       | head -5 \
       | while IFS= read -r line; do log "   $line"; done
-    return 1
-  }
+    return $exit_code
+  fi
 }
 
 with_retry() {
@@ -108,7 +122,7 @@ has_lfs() {
 import sys, json, base64
 try:
     data = json.load(sys.stdin)
-    content = base64.b64decode(data.get('content', '')).decode('utf-8', errors='ignore')
+    content = base64.b64decode(data.get('content','')).decode('utf-8',errors='ignore')
     sys.exit(0 if 'lfs' in content.lower() else 1)
 except Exception:
     sys.exit(1)
@@ -126,191 +140,91 @@ get_latest_sha() {
 import sys, json
 try:
     data = json.load(sys.stdin)
-    print(data[0].get('sha', '') if isinstance(data, list) and data else '')
+    print(data[0].get('sha','') if isinstance(data,list) and data else '')
 except Exception:
     print('')
 " 2>/dev/null || echo ""
 }
 
 # ── Get last known SHA from previous state ────────────────────
+# Pass URL as argument to avoid bash variable expansion in Python
 get_last_sha() {
   local url="$1"
   [ ! -f "$PREV_STATE" ] && echo "" && return 0
-  python3 -c "
-import json
+  python3 - "$PREV_STATE" "$url" << 'PYEOF'
+import json, sys
+state_file = sys.argv[1]
+url        = sys.argv[2]
 try:
-    with open('$PREV_STATE') as f:
+    with open(state_file) as f:
         state = json.load(f)
-    print(state.get('$url', {}).get('last_commit_sha', ''))
+    print(state.get(url, {}).get('last_commit_sha', ''))
 except Exception:
     print('')
-" 2>/dev/null || echo ""
+PYEOF
 }
 
-# ── Move repo to LFS exclusion list ──────────────────────────
+# ── Move repo from repos.yml to lfs-repos.txt ─────────────────
 move_to_lfs_file() {
   local url="$1"
-  local repos_file="$REPOS_FILE"
-
-  # Remove from repos.yml using Python
-  python3 - "$repos_file" "$url" << 'PYEOF'
-import sys, yaml
-
-repos_file = sys.argv[1]
-url        = sys.argv[2]
-
-try:
-    with open(repos_file) as f:
-        data = yaml.safe_load(f) or {}
-except Exception as e:
-    print(f"[lfs] repos.yml read error: {e}", file=sys.stderr)
-    sys.exit(1)
-
-# Remove from groups
-for group in (data.get("groups") or {}).values():
-    if group and url in group:
-        group.remove(url)
-
-# Remove from ungrouped
-ungrouped = data.get("ungrouped") or []
-if url in ungrouped:
-    ungrouped.remove(url)
-data["ungrouped"] = ungrouped
-
-try:
-    with open(repos_file, "w") as f:
-        yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
-    print(f"✅ Removed from repos.yml")
-except Exception as e:
-    print(f"[lfs] repos.yml write error: {e}", file=sys.stderr)
-    sys.exit(1)
-PYEOF
-
-  # Append to lfs-repos.txt
+  python3 "${GITHUB_WORKSPACE}/scripts/python/add-to-repos.py" \
+    --remove "$REPOS_FILE" "$url" 2>/dev/null || true
   touch "$LFS_FILE"
-  if ! grep -qF "$url" "$LFS_FILE"; then
-    echo "$url" >> "$LFS_FILE"
-  fi
+  grep -qF "$url" "$LFS_FILE" 2>/dev/null || echo "$url" >> "$LFS_FILE"
 }
 
-# ── Add result entry ──────────────────────────────────────────
+# ── Add result to in-memory dict ──────────────────────────────
 add_result() {
-  local url="$1"
-  local subgroup="$2"
-  local status="$3"
-  local clone_time="${4:-0}"
-  local push_time="${5:-0}"
-  local total_time="${6:-0}"
-  local repo_size="${7:-—}"
-  local branches="${8:-0}"
-  local tags="${9:-0}"
-  local retries="${10:-0}"
-  local commit_sha="${11:-}"
+  local url="$1" subgroup="$2" status="$3"
+  local clone_time="${4:-0}" push_time="${5:-0}" total_time="${6:-0}"
+  local repo_size="${7:-—}" branches="${8:-0}" tags="${9:-0}"
+  local retries="${10:-0}" commit_sha="${11:-}"
 
-  RESULTS_DATA=$(python3 -c "
+  RESULTS_DATA=$(python3 - \
+    "$RESULTS_DATA" "$url" "$subgroup" "$status" \
+    "$clone_time" "$push_time" "$total_time" \
+    "$repo_size" "$branches" "$tags" \
+    "$retries" "$commit_sha" << 'PYEOF'
 import json, sys
 try:
     data = json.loads(sys.argv[1])
 except Exception:
     data = {}
-data[sys.argv[2]] = {
-    'subgroup':        sys.argv[3],
-    'status':          sys.argv[4],
-    'clone_time':      int(sys.argv[5]),
-    'push_time':       int(sys.argv[6]),
-    'total_time':      int(sys.argv[7]),
-    'size':            sys.argv[8],
-    'branches':        int(sys.argv[9])  if sys.argv[9].isdigit()  else 0,
-    'tags':            int(sys.argv[10]) if sys.argv[10].isdigit() else 0,
-    'retries':         int(sys.argv[11]),
-    'last_commit_sha': sys.argv[12],
+
+url        = sys.argv[2]
+subgroup   = sys.argv[3]
+status     = sys.argv[4]
+clone_time = int(sys.argv[5])
+push_time  = int(sys.argv[6])
+total_time = int(sys.argv[7])
+repo_size  = sys.argv[8]
+branches   = int(sys.argv[9])  if sys.argv[9].isdigit()  else 0
+tags       = int(sys.argv[10]) if sys.argv[10].isdigit() else 0
+retries    = int(sys.argv[11])
+commit_sha = sys.argv[12]
+
+entry = {
+    "subgroup":        subgroup,
+    "status":          status,
+    "last_commit_sha": commit_sha,
 }
+
+# Only write timing/size for non-skipped repos
+if status != "skipped":
+    entry.update({
+        "clone_time": clone_time,
+        "push_time":  push_time,
+        "total_time": total_time,
+        "size":       repo_size,
+        "branches":   branches,
+        "tags":       tags,
+        "retries":    retries,
+    })
+
+data[url] = entry
 print(json.dumps(data))
-" "$RESULTS_DATA" "$url" "$subgroup" "$status" \
-    "$clone_time" "$push_time" "$total_time" \
-    "$repo_size" "$branches" "$tags" \
-    "$retries" "$commit_sha" 2>/dev/null) || true
-}
-
-# ── Ensure GitLab namespace (group or subgroup) exists ────────
-ensure_namespace() {
-  local subgroup="$1"   # empty = use parent group directly
-
-  if [ -z "$subgroup" ]; then
-    # No subgroup — get parent group ID
-    curl -s \
-      --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-      "$REMOTE_URL/api/v4/groups?search=$PARENT_FOLDER" \
-      | python3 -c "
-import sys, json
-try:
-    groups = json.load(sys.stdin)
-    print(next((g['id'] for g in groups if g['path'] == '$PARENT_FOLDER'), ''))
-except Exception:
-    print('')
-"
-    return 0
-  fi
-
-  # Check if subgroup already exists
-  local full_path="${PARENT_FOLDER}/${subgroup}"
-  local encoded_path
-  encoded_path=$(python3 -c \
-    "import urllib.parse; print(urllib.parse.quote('$full_path', safe=''))")
-
-  local existing
-  existing=$(curl -s \
-    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-    "$REMOTE_URL/api/v4/groups/$encoded_path" \
-    | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('id', ''))
-except Exception:
-    print('')
-")
-
-  if [ -n "$existing" ]; then
-    echo "$existing"
-    return 0
-  fi
-
-  # Create subgroup under parent
-  local parent_id
-  parent_id=$(curl -s \
-    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-    "$REMOTE_URL/api/v4/groups?search=$PARENT_FOLDER" \
-    | python3 -c "
-import sys, json
-try:
-    groups = json.load(sys.stdin)
-    print(next((g['id'] for g in groups if g['path'] == '$PARENT_FOLDER'), ''))
-except Exception:
-    print('')
-")
-
-  if [ -z "$parent_id" ]; then
-    log "   ❌ Could not find parent group"
-    echo ""
-    return 1
-  fi
-
-  log "   🆕 Creating subgroup: $subgroup"
-  curl -s \
-    --request POST \
-    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-    --header "Content-Type: application/json" \
-    --data "{\"name\":\"$subgroup\",\"path\":\"$subgroup\",\"parent_id\":$parent_id,\"visibility\":\"private\"}" \
-    "$REMOTE_URL/api/v4/groups" \
-    | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('id', ''))
-except Exception:
-    print('')
-"
+PYEOF
+) || true
 }
 
 # ── Get GitLab project ID from path ──────────────────────────
@@ -318,7 +232,7 @@ get_project_id() {
   local path="$1"
   local encoded
   encoded=$(python3 -c \
-    "import urllib.parse; print(urllib.parse.quote('${path}', safe=''))")
+    "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$path")
   curl -s \
     --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
     "$REMOTE_URL/api/v4/projects/$encoded" \
@@ -326,17 +240,16 @@ get_project_id() {
 import sys, json
 try:
     data = json.load(sys.stdin)
-    pid = data.get('id', '')
-    print(pid if pid else '')
+    print(data.get('id',''))
 except Exception:
     print('')
 " 2>/dev/null || echo ""
 }
 
 # ── Transfer GitLab project to a different namespace ──────────
-move_project() {
+transfer_project() {
   local project_id="$1"
-  local target_namespace="$2"   # full path e.g. "codeark/bitwarden"
+  local target_namespace="$2"
 
   log "   🚚 Transferring repo to subgroup..."
   local response result body
@@ -353,9 +266,10 @@ move_project() {
   if [ "$result" == "200" ]; then
     log "   ✅ Repo transferred to subgroup"
     return 0
-  else
-    local api_error
-    api_error=$(echo "$body" | python3 -c "
+  fi
+
+  local api_error
+  api_error=$(echo "$body" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -363,12 +277,84 @@ try:
 except Exception:
     print(sys.stdin.read()[:200])
 " 2>/dev/null)
-    log "   ❌ Transfer failed (HTTP $result): $api_error"
-    return 1
-  fi
+  log "   ❌ Transfer failed (HTTP $result): $api_error"
+  return 1
 }
 
-# ── Ensure destination repo exists under correct namespace ────
+# ── Ensure GitLab namespace (subgroup) exists ─────────────────
+ensure_namespace() {
+  local subgroup="$1"
+
+  if [ -z "$subgroup" ]; then
+    # Return parent group ID
+    curl -s \
+      --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+      "$REMOTE_URL/api/v4/groups?search=$PARENT_FOLDER" \
+      | python3 -c "
+import sys, json
+try:
+    groups = json.load(sys.stdin)
+    print(next((g['id'] for g in groups if g['path']=='$PARENT_FOLDER'),''))
+except Exception:
+    print('')
+"
+    return 0
+  fi
+
+  local full_path="${PARENT_FOLDER}/${subgroup}"
+  local encoded
+  encoded=$(python3 -c \
+    "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$full_path")
+
+  local existing_id
+  existing_id=$(curl -s \
+    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+    "$REMOTE_URL/api/v4/groups/$encoded" \
+    | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('id',''))
+except Exception:
+    print('')
+")
+
+  [ -n "$existing_id" ] && echo "$existing_id" && return 0
+
+  # Create subgroup
+  local parent_id
+  parent_id=$(curl -s \
+    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+    "$REMOTE_URL/api/v4/groups?search=$PARENT_FOLDER" \
+    | python3 -c "
+import sys, json
+try:
+    groups = json.load(sys.stdin)
+    print(next((g['id'] for g in groups if g['path']=='$PARENT_FOLDER'),''))
+except Exception:
+    print('')
+")
+
+  [ -z "$parent_id" ] && { log "   ❌ Could not find parent group"; echo ""; return 1; }
+
+  log "   🆕 Creating subgroup: $subgroup"
+  curl -s \
+    --request POST \
+    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+    --header "Content-Type: application/json" \
+    --data "{\"name\":\"$subgroup\",\"path\":\"$subgroup\",\"parent_id\":$parent_id,\"visibility\":\"private\"}" \
+    "$REMOTE_URL/api/v4/groups" \
+    | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('id',''))
+except Exception:
+    print('')
+"
+}
+
+# ── Ensure destination repo exists ────────────────────────────
 ensure_remote_repo() {
   local repo_name="$1"
   local namespace_id="$2"
@@ -378,7 +364,7 @@ ensure_remote_repo() {
     local full_path="${PARENT_FOLDER}/${subgroup}/${repo_name}"
     local root_path="${PARENT_FOLDER}/${repo_name}"
 
-    # Case 1: already exists at subgroup path ✅
+    # Case 1: exists at subgroup path already ✅
     local subgroup_proj_id
     subgroup_proj_id=$(get_project_id "$full_path")
     if [ -n "$subgroup_proj_id" ]; then
@@ -386,32 +372,26 @@ ensure_remote_repo() {
       return 0
     fi
 
-    # Case 2: exists at root → move it to subgroup
+    # Case 2: exists at root → transfer to subgroup
     local root_proj_id
     root_proj_id=$(get_project_id "$root_path")
     if [ -n "$root_proj_id" ]; then
       log "   📦 Repo found at root — transferring to subgroup"
-      local target_namespace="${PARENT_FOLDER}/${subgroup}"
-      if move_project "$root_proj_id" "$target_namespace"; then
+      if transfer_project "$root_proj_id" "${PARENT_FOLDER}/${subgroup}"; then
         RESOLVED_DEST_URL="${REMOTE_URL/https:\/\//https://oauth2:${REMOTE_TOKEN}@}/${full_path}.git"
         return 0
-      else
-        log "   ⚠️  Transfer failed — will create fresh under subgroup"
       fi
+      log "   ⚠️  Transfer failed — creating fresh under subgroup"
     fi
 
   else
-    # No subgroup — check root only
     local root_path="${PARENT_FOLDER}/${repo_name}"
     local root_proj_id
     root_proj_id=$(get_project_id "$root_path")
-    if [ -n "$root_proj_id" ]; then
-      log "   📦 Repo exists at root"
-      return 0
-    fi
+    [ -n "$root_proj_id" ] && { log "   📦 Repo exists at root"; return 0; }
   fi
 
-  # Case 3: does not exist anywhere → create under correct namespace
+  # Case 3: create fresh
   log "   🆕 Creating repo (namespace_id: $namespace_id)"
   local response result body
   response=$(curl -s -w "\n%{http_code}" \
@@ -424,21 +404,19 @@ ensure_remote_repo() {
   result=$(echo "$response" | tail -1)
   body=$(echo "$response" | head -n -1)
 
-  if [ "$result" == "201" ]; then
-    return 0
-  fi
+  [ "$result" == "201" ] && return 0
 
   local api_error
   api_error=$(echo "$body" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    print(str(data.get('message', 'unknown error'))[:200])
+    print(str(data.get('message','unknown error'))[:200])
 except Exception:
     print('unknown error')
 " 2>/dev/null)
 
-  # Treat "already taken" as success — repo exists, just not detected earlier
+  # Already exists = treat as success
   if echo "$api_error" | grep -qi "already been taken\|already exists"; then
     log "   📦 Repo already exists — proceeding"
     return 0
@@ -451,7 +429,7 @@ except Exception:
 # ── Sync a single repo ────────────────────────────────────────
 sync_repo() {
   local source_url="$1"
-  local subgroup="$2"   # may be empty
+  local subgroup="$2"
 
   local repo_name
   repo_name=$(basename "$source_url" .git)
@@ -459,18 +437,16 @@ sync_repo() {
   owner=$(echo "$source_url" | sed 's|https://github.com/||' | cut -d/ -f1)
   local work_dir="$WORK_DIR/$repo_name"
 
-  # Build dest URL with subgroup path if present
   local dest_path
-  if [ -n "$subgroup" ]; then
-    dest_path="${PARENT_FOLDER}/${subgroup}/${repo_name}.git"
-  else
-    dest_path="${PARENT_FOLDER}/${repo_name}.git"
-  fi
+  [ -n "$subgroup" ] && dest_path="${PARENT_FOLDER}/${subgroup}/${repo_name}.git" \
+                     || dest_path="${PARENT_FOLDER}/${repo_name}.git"
+
   local dest_url
   dest_url="${REMOTE_URL/https:\/\//https://oauth2:${REMOTE_TOKEN}@}/${dest_path}"
 
   local display_name
   [ -n "$subgroup" ] && display_name="$subgroup/$repo_name" || display_name="$repo_name"
+
   log "⏳ $display_name"
 
   # ── LFS check ─────────────────────────────────────────────────
@@ -506,7 +482,7 @@ sync_repo() {
     [ -z "$current_sha" ] && log "   ⚠️  Could not fetch SHA — proceeding anyway"
   fi
 
-  # ── Ensure namespace + repo exist ────────────────────────────
+  # ── Ensure namespace + repo ───────────────────────────────────
   local namespace_id
   namespace_id=$(ensure_namespace "$subgroup")
 
@@ -518,8 +494,6 @@ sync_repo() {
     return 1
   fi
 
-  # RESOLVED_DEST_URL may be updated by ensure_remote_repo
-  # if repo found at a different path (e.g. root instead of subgroup)
   RESOLVED_DEST_URL="$dest_url"
 
   if ! ensure_remote_repo "$repo_name" "$namespace_id" "$subgroup"; then
@@ -530,7 +504,6 @@ sync_repo() {
     return 1
   fi
 
-  # Use resolved dest URL (may have changed if repo found at root)
   dest_url="$RESOLVED_DEST_URL"
 
   mkdir -p "$work_dir"
@@ -543,9 +516,7 @@ sync_repo() {
     silent git init --bare "$work_dir" && \
     cd "$work_dir" && \
     silent git remote add origin "$source_url" && \
-    with_retry git fetch --prune origin \
-      '+refs/heads/*:refs/heads/*' \
-      '+refs/tags/*:refs/tags/*'
+    with_retry git fetch --prune origin       '+refs/heads/*:refs/heads/*'       '+refs/tags/*:refs/tags/*' 2>> "$VERBOSE_LOG"
   ); then
     log "❌ $display_name — fetch failed"
     rm -rf "$work_dir"
@@ -627,11 +598,9 @@ main() {
     exit 1
   fi
 
-  # Check PyYAML available
   python3 -c "import yaml" 2>/dev/null || {
     log "📦 Installing PyYAML..."
-    pip install pyyaml -q --break-system-packages 2>/dev/null || \
-    pip3 install pyyaml -q 2>/dev/null || true
+    pip install pyyaml -q --break-system-packages 2>/dev/null || true
   }
 
   mkdir -p "$WORK_DIR"
@@ -639,15 +608,16 @@ main() {
 
   TOTAL_START=$(date +%s)
 
-  # Parse repos.yml into "url subgroup" lines
-  mapfile -t REPO_LINES < <(python3 scripts/parse-repos.py "$REPOS_FILE" 2>/dev/null || true)
+  mapfile -t REPO_LINES < <(
+    python3 "${GITHUB_WORKSPACE}/scripts/python/parse-repos.py" "$REPOS_FILE" 2>/dev/null || true
+  )
 
   for line in "${REPO_LINES[@]}"; do
+    [ -z "$line" ] && continue
     local url subgroup
     url=$(echo "$line" | awk '{print $1}')
     subgroup=$(echo "$line" | awk '{print $2}')
     subgroup="${subgroup:-}"
-    [ -z "$url" ] && continue
     sync_repo "$url" "$subgroup"
   done
 

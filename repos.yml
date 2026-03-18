@@ -1,51 +1,49 @@
 groups:
   bitwarden:
-    - https://github.com/bitwarden/server
-    - https://github.com/bitwarden/clients
-    - https://github.com/bitwarden/self-host
-    - https://github.com/bitwarden/android
-    - https://github.com/bitwarden/ios
- 
+  - https://github.com/bitwarden/server
+  - https://github.com/bitwarden/clients
+  - https://github.com/bitwarden/self-host
+  - https://github.com/bitwarden/android
+  - https://github.com/bitwarden/ios
   wireguard:
-    - https://github.com/WireGuard/wireguard-android
-    - https://github.com/WireGuard/wireguard-tools
-    - https://github.com/WireGuard/wireguard-linux
-    - https://github.com/WireGuard/wireguard-windows
-    - https://github.com/WireGuard/wireguard-go
-    - https://github.com/WireGuard/wireguard-apple
-    - https://github.com/WireGuard/wireguard-monolithic-historical
- 
- 
+  - https://github.com/WireGuard/wireguard-android
+  - https://github.com/WireGuard/wireguard-tools
+  - https://github.com/WireGuard/wireguard-linux
+  - https://github.com/WireGuard/wireguard-windows
+  - https://github.com/WireGuard/wireguard-go
+  - https://github.com/WireGuard/wireguard-apple
+  - https://github.com/WireGuard/wireguard-monolithic-historical
 ungrouped:
-    - https://github.com/C4illin/ConvertX
-    - https://github.com/hcengineering/platform
-    - https://github.com/louislam/uptime-kuma
-    - https://github.com/syncthing/syncthing
-    - https://github.com/docmost/docmost
-    - https://github.com/firefly-iii/firefly-iii/
-    - https://github.com/penpot/penpot
-    - https://github.com/Stirling-Tools/Stirling-PDF
-    - https://github.com/wiredoor/wiredoor
-    - https://github.com/ntop/ntopng
-    - https://github.com/henrygd/beszel
-    - https://github.com/nginx/nginx
-    - https://github.com/caddyserver/caddy
-    - https://github.com/netbox-community/netbox
-    - https://github.com/opnsense/core
-    - https://github.com/goauthentik/authentik
-    - https://github.com/hay-kot/homebox
-    - https://github.com/dani-garcia/vaultwarden
-    - https://github.com/mealie-recipes/mealie
-    - https://github.com/navidrome/navidrome
-    - https://github.com/CorentinTh/it-tools
-    - https://github.com/wger-project/wger
-    - https://github.com/afaneca/myfin
-    - https://github.com/stakater/Reloader
-    - https://codeberg.org/forgejo/forgejo
-    - https://github.com/go-gitea/gitea
-    - https://github.com/beclab/Olares
-    - https://github.com/Oghamark/homebranch
-    - https://github.com/Raphire/Win11Debloat
-    - https://github.com/ImranR98/Obtainium
-    - https://github.com/NeoApplications/Neo-Store
-    - https://github.com/chartdb/chartdb
+- https://github.com/C4illin/ConvertX
+- https://github.com/hcengineering/platform
+- https://github.com/louislam/uptime-kuma
+- https://github.com/syncthing/syncthing
+- https://github.com/docmost/docmost
+- https://github.com/firefly-iii/firefly-iii/
+- https://github.com/penpot/penpot
+- https://github.com/Stirling-Tools/Stirling-PDF
+- https://github.com/wiredoor/wiredoor
+- https://github.com/ntop/ntopng
+- https://github.com/henrygd/beszel
+- https://github.com/nginx/nginx
+- https://github.com/caddyserver/caddy
+- https://github.com/netbox-community/netbox
+- https://github.com/opnsense/core
+- https://github.com/goauthentik/authentik
+- https://github.com/hay-kot/homebox
+- https://github.com/dani-garcia/vaultwarden
+- https://github.com/mealie-recipes/mealie
+- https://github.com/navidrome/navidrome
+- https://github.com/CorentinTh/it-tools
+- https://github.com/wger-project/wger
+- https://github.com/afaneca/myfin
+- https://github.com/stakater/Reloader
+- https://codeberg.org/forgejo/forgejo
+- https://github.com/go-gitea/gitea
+- https://github.com/beclab/Olares
+- https://github.com/Oghamark/homebranch
+- https://github.com/Raphire/Win11Debloat
+- https://github.com/ImranR98/Obtainium
+- https://github.com/NeoApplications/Neo-Store
+- https://github.com/chartdb/chartdb
+- https://github.com/abhixdd/ghgrab

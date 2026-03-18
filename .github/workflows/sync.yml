@@ -11,9 +11,9 @@ on:
         required: true
         default: single
         options:
-          - single    # test single repo from test.yml
-          - group     # test group repo from test.yml
-          - full      # sync all repos (same as scheduled)
+          - single    # first ungrouped URL from test.yml
+          - group     # first URL from first group in test.yml
+          - full      # all repos in repos.yml
       force_full:
         description: 'Force full clone — ignore SHA check'
         type: boolean
@@ -63,6 +63,10 @@ jobs:
           fi
 
       # ── Prepare repos file based on mode ─────────────────────
+      # full/scheduled → repos.yml (all repos)
+      # single         → first ungrouped URL from test.yml
+      # group          → first URL from first group in test.yml
+      # test.yml uses same format as repos.yml
       - name: Prepare repos file
         env:
           MODE:     ${{ github.event.inputs.mode || 'full' }}
@@ -71,15 +75,11 @@ jobs:
           if [ "$IS_SCHED" = "true" ] || [ "$MODE" = "full" ]; then
             echo "📋 Full mode — using repos.yml"
             echo "SYNC_REPOS=repos.yml" >> $GITHUB_ENV
-
           elif [ "$MODE" = "single" ]; then
-            echo "🎯 Single test mode"
-            python3 scripts/python/parse-test.py test.yml single
+            python3 scripts/python/prepare-test.py test.yml single
             echo "SYNC_REPOS=/tmp/test-repos.yml" >> $GITHUB_ENV
-
           elif [ "$MODE" = "group" ]; then
-            echo "🎯 Group test mode"
-            python3 scripts/python/parse-test.py test.yml group
+            python3 scripts/python/prepare-test.py test.yml group
             echo "SYNC_REPOS=/tmp/test-repos.yml" >> $GITHUB_ENV
           fi
 
@@ -120,13 +120,14 @@ jobs:
           STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
           REPOS_FILE:       repos.yml
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
           README_ONLY:      "false"
         run: |
           git checkout repos.yml 2>/dev/null || true
           chmod +x scripts/generate-readme.sh
           bash scripts/generate-readme.sh
 
-      # ── Upload log ───────────────────────────────────────────
+      # ── Upload logs ───────────────────────────────────────────
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4

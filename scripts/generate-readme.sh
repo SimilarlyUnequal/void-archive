@@ -1,4 +1,12 @@
 #!/bin/bash
+# =============================================================
+#  void-archive — generate-readme.sh
+#  Generates a dashboard README.md for the remote group page
+#  - Syncs mode: merges results, backs up state + results to GitHub
+#  - README-only mode: reads state from GitHub private repo
+#  - Fallback: if merge fails, retries from backed-up results
+#  - All JSON ops wrapped in try/except
+# =============================================================
 
 set -euo pipefail
 
@@ -14,6 +22,7 @@ export GIT_ASKPASS=/bin/false
 : "${STATE_REPO_URL:?❌  STATE_REPO_URL is not set}"
 : "${STATE_REPO_TOKEN:?❌  STATE_REPO_TOKEN is not set}"
 : "${GITHUB_TOKEN:?❌  GITHUB_TOKEN is not set}"
+: "${GITHUB_WORKSPACE:?❌  GITHUB_WORKSPACE is not set}"
 
 # ── Config ────────────────────────────────────────────────────
 GITLAB_WORK="/tmp/void-profile"
@@ -264,32 +273,39 @@ except Exception as e:
     print(f"[readme] repos file error: {e}", file=sys.stderr)
     sys.exit(1)
 
-current_category = None
-url_category     = {}
-all_urls         = []
+# Parse repos.yml via yaml — subgroup = category
+import yaml as _yaml
+url_subgroup = {}
+all_urls     = []
 
-for line in lines:
-    line = line.rstrip()
-    if not line:
-        current_category = None
-        continue
-    cat = re.match(r'^#\s*[-–—]?\s*(.+?)\s*[-–—]?\s*$', line)
-    if cat and not line.startswith('# void-archive'):
-        current_category = cat.group(1).strip()
-        continue
-    if line.startswith('#') or not line.startswith('http'):
-        continue
-    url = line.strip()
-    all_urls.append(url)
-    if current_category:
-        url_category[url] = current_category
+try:
+    with open(repos_file) as yf:
+        ydata = _yaml.safe_load(yf) or {}
+except Exception as e:
+    print(f"[readme] repos.yml parse error: {e}", file=sys.stderr)
+    ydata = {}
+
+for group, urls in (ydata.get("groups") or {}).items():
+    for url in (urls or []):
+        url = url.strip()
+        if url:
+            all_urls.append(url)
+            url_subgroup[url] = group
+
+for url in (ydata.get("ungrouped") or []):
+    url = url.strip()
+    if url:
+        all_urls.append(url)
 
 def get_category(url):
-    if url in url_category:
-        return url_category[url].title()
+    # 1. Explicit subgroup from repos.yml
+    if url in url_subgroup:
+        return url_subgroup[url].title()
+    # 2. GitHub topic tag fallback
     topics = state.get(url, {}).get("topics") or []
     if topics:
         return topics[0].replace("-", " ").title()
+    # 3. Fallback
     return "General"
 
 def fmt_time(secs):

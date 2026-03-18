@@ -32,8 +32,6 @@ FORCE_FULL="${FORCE_FULL:-false}"
 # ── Resolve workspace paths ───────────────────────────────────
 REPOS_FILE="$(realpath "$REPOS_FILE")"
 LFS_FILE="${GITHUB_WORKSPACE}/lfs-repos.txt"
-PYTHON="python3 ${GITHUB_WORKSPACE}/scripts/python"
-
 # ── Internal config ───────────────────────────────────────────
 WORK_DIR="/tmp/void-work"
 LOG_FILE="/tmp/sync.log"

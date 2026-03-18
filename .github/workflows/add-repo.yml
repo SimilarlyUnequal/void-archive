@@ -29,7 +29,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v4
 
       - name: Configure Git
         run: |
@@ -52,7 +52,7 @@ jobs:
           SKIPPED=0
           LFS_BLOCKED=0
 
-          CLEAN_URLS=$(echo "$ADD_REPOS" | python3 scripts/split-urls.py)
+          CLEAN_URLS=$(echo "$ADD_REPOS" | python3 scripts/python/split-urls.py)
 
           while IFS= read -r url; do
             [ -z "$url" ] && continue
@@ -63,14 +63,14 @@ jobs:
               continue
             fi
 
-            EXISTS=$(python3 scripts/check-in-repos.py repos.yml "$url")
+            EXISTS=$(python3 scripts/python/check-in-repos.py repos.yml "$url")
             if [ "$EXISTS" = "yes" ]; then
               echo "⏭️  Already exists: $(basename $url .git)"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
 
-            python3 scripts/add-to-repos.py repos.yml "$url" "$GROUP"
+            python3 scripts/python/add-to-repos.py repos.yml "$url" "$GROUP"
             echo "➕ Added: $(basename $url .git)${GROUP:+ → $GROUP}"
             ADDED=$((ADDED + 1))
           done <<< "$CLEAN_URLS"
@@ -121,7 +121,7 @@ jobs:
             echo "⏭️  Nothing new to sync"
             exit 0
           fi
-          python3 scripts/make-temp-repos.py /tmp/newly-added.txt "$GROUP" /tmp/newly-added.yml
+          python3 scripts/python/make-temp-repos.py /tmp/newly-added.txt "$GROUP" /tmp/newly-added.yml
           chmod +x scripts/sync.sh
           bash scripts/sync.sh || true
 
@@ -149,6 +149,7 @@ jobs:
           STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
           REPOS_FILE:       repos.yml
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
           README_ONLY:      "false"
         run: |
           git checkout repos.yml 2>/dev/null || true
@@ -156,12 +157,14 @@ jobs:
           bash scripts/generate-readme.sh
 
       # ── Upload log ───────────────────────────────────────────
-      - name: Upload log
+      - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v6.0.0
+        uses: actions/upload-artifact@v4
         with:
           name: add-repos-log-${{ github.run_id }}
-          path: /tmp/sync.log
+          path: |
+            /tmp/sync.log
+            /tmp/sync-verbose.log
           retention-days: 30
 
       - name: Print log

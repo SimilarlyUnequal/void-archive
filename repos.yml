@@ -1,10 +1,12 @@
 groups:
+
   bitwarden:
   - https://github.com/bitwarden/server
   - https://github.com/bitwarden/clients
   - https://github.com/bitwarden/self-host
   - https://github.com/bitwarden/android
   - https://github.com/bitwarden/ios
+  
   wireguard:
   - https://github.com/WireGuard/wireguard-android
   - https://github.com/WireGuard/wireguard-tools
@@ -13,6 +15,28 @@ groups:
   - https://github.com/WireGuard/wireguard-go
   - https://github.com/WireGuard/wireguard-apple
   - https://github.com/WireGuard/wireguard-monolithic-historical
+
+  authpass:
+  - https://github.com/authpass/kdbx.dart
+  - https://github.com/authpass/authpass
+  - https://github.com/authpass/biometric_storage
+
+  buttercup:
+  - https://github.com/buttercup/buttercup-cli
+  - https://github.com/buttercup/buttercup-mobile
+  - https://github.com/buttercup/buttercup-desktop
+  - https://github.com/buttercup/buttercup-browser-extension
+  - https://github.com/buttercup/buttercup-core
+  - https://github.com/buttercup/buttercup
+  - https://github.com/buttercup/buttercup-generator
+  - https://github.com/buttercup/buttercup-importer
+  - https://github.com/buttercup/fetch
+  - https://github.com/buttercup/buttercup-exporter
+  
+  fluxer:
+  - https://github.com/fluxerapp/fluxer
+  - https://github.com/fluxerapp/dart_sdk
+
 ungrouped:
 - https://github.com/C4illin/ConvertX
 - https://github.com/hcengineering/platform
@@ -59,3 +83,11 @@ ungrouped:
 - https://github.com/sosauce/CuteMusic
 - https://github.com/RetroMusicPlayer/RetroMusicPlayer
 - https://github.com/fast4x/RiPlay
+- https://github.com/Auto-Explore/GitComet
+- https://github.com/matthart1983/netwatch
+- https://github.com/0xERR0R/blocky
+- https://github.com/Kunzisoft/KeePassDX
+- https://github.com/stirling-image/stirling-image
+- https://github.com/Aryan-Raj3112/episteme
+- https://github.com/mihonapp/mihon
+- https://github.com/yuliskov/SmartTube

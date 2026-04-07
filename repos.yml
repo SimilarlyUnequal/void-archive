@@ -1,26 +1,14 @@
 groups:
-
+  authpass:
+  - https://github.com/authpass/kdbx.dart
+  - https://github.com/authpass/authpass
+  - https://github.com/authpass/biometric_storage
   bitwarden:
   - https://github.com/bitwarden/server
   - https://github.com/bitwarden/clients
   - https://github.com/bitwarden/self-host
   - https://github.com/bitwarden/android
   - https://github.com/bitwarden/ios
-  
-  wireguard:
-  - https://github.com/WireGuard/wireguard-android
-  - https://github.com/WireGuard/wireguard-tools
-  - https://github.com/WireGuard/wireguard-linux
-  - https://github.com/WireGuard/wireguard-windows
-  - https://github.com/WireGuard/wireguard-go
-  - https://github.com/WireGuard/wireguard-apple
-  - https://github.com/WireGuard/wireguard-monolithic-historical
-
-  authpass:
-  - https://github.com/authpass/kdbx.dart
-  - https://github.com/authpass/authpass
-  - https://github.com/authpass/biometric_storage
-
   buttercup:
   - https://github.com/buttercup/buttercup-cli
   - https://github.com/buttercup/buttercup-mobile
@@ -32,11 +20,17 @@ groups:
   - https://github.com/buttercup/buttercup-importer
   - https://github.com/buttercup/fetch
   - https://github.com/buttercup/buttercup-exporter
-  
   fluxer:
   - https://github.com/fluxerapp/fluxer
   - https://github.com/fluxerapp/dart_sdk
-
+  wireguard:
+  - https://github.com/WireGuard/wireguard-android
+  - https://github.com/WireGuard/wireguard-tools
+  - https://github.com/WireGuard/wireguard-linux
+  - https://github.com/WireGuard/wireguard-windows
+  - https://github.com/WireGuard/wireguard-go
+  - https://github.com/WireGuard/wireguard-apple
+  - https://github.com/WireGuard/wireguard-monolithic-historical
 ungrouped:
 - https://github.com/C4illin/ConvertX
 - https://github.com/hcengineering/platform
@@ -91,3 +85,4 @@ ungrouped:
 - https://github.com/Aryan-Raj3112/episteme
 - https://github.com/mihonapp/mihon
 - https://github.com/yuliskov/SmartTube
+- https://github.com/AppFlowy-IO/AppFlowy

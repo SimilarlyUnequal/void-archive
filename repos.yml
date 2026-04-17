@@ -3,12 +3,14 @@ groups:
   - https://github.com/authpass/kdbx.dart
   - https://github.com/authpass/authpass
   - https://github.com/authpass/biometric_storage
+  
   bitwarden:
   - https://github.com/bitwarden/server
   - https://github.com/bitwarden/clients
   - https://github.com/bitwarden/self-host
   - https://github.com/bitwarden/android
   - https://github.com/bitwarden/ios
+  
   buttercup:
   - https://github.com/buttercup/buttercup-cli
   - https://github.com/buttercup/buttercup-mobile
@@ -20,9 +22,11 @@ groups:
   - https://github.com/buttercup/buttercup-importer
   - https://github.com/buttercup/fetch
   - https://github.com/buttercup/buttercup-exporter
+  
   fluxer:
   - https://github.com/fluxerapp/fluxer
   - https://github.com/fluxerapp/dart_sdk
+  
   wireguard:
   - https://github.com/WireGuard/wireguard-android
   - https://github.com/WireGuard/wireguard-tools
@@ -31,6 +35,12 @@ groups:
   - https://github.com/WireGuard/wireguard-go
   - https://github.com/WireGuard/wireguard-apple
   - https://github.com/WireGuard/wireguard-monolithic-historical
+  
+  nuvio-media:
+  - https://github.com/NuvioMedia/NuvioMobile
+  - https://github.com/NuvioMedia/NuvioTV
+  - https://github.com/NuvioMedia/NuvioWeb
+
 ungrouped:
 - https://github.com/C4illin/ConvertX
 - https://github.com/hcengineering/platform
@@ -88,3 +98,16 @@ ungrouped:
 - https://github.com/AppFlowy-IO/AppFlowy
 - https://github.com/rn-swain/Ghostwire
 - https://github.com/fastforgedev/fastforge
+- https://github.com/anandprtp/Antra
+- https://github.com/sdk445/hmon
+- https://github.com/hurshnarayan/reyna
+- https://github.com/juanfont/headscale
+- https://github.com/netbirdio/netbird
+- https://github.com/gravitl/netmaker
+- https://github.com/slackhq/nebula
+- https://github.com/tonarino/innernet
+- https://github.com/octelium/octelium
+- https://github.com/LetsFG/LetsFG
+- https://github.com/monochrome-music/monochrome
+- https://github.com/BookStackApp/BookStack
+- https://github.com/sync-in/server

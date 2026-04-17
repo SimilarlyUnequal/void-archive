@@ -110,6 +110,7 @@ github_api() {
 }
 
 # ── Detect LFS via GitHub API ─────────────────────────────────
+# Checks .gitattributes for lfs filter — no cloning needed
 has_lfs() {
   local owner="$1"
   local repo="$2"
@@ -125,6 +126,16 @@ try:
 except Exception:
     sys.exit(1)
 " 2>/dev/null
+}
+
+# ── Detect LFS in already-cloned bare repo ────────────────────
+# Some repos have LFS only on specific branches, not in root .gitattributes
+bare_repo_has_lfs() {
+  local work_dir="$1"
+  # Check any .gitattributes across all refs for lfs filter
+  git -C "$work_dir" grep -r "filter=lfs" -- "*.gitattributes" \
+    $(git -C "$work_dir" for-each-ref --format='%(refname)') \
+    2>/dev/null | grep -q "filter=lfs"
 }
 
 # ── Get latest commit SHA ─────────────────────────────────────
@@ -333,9 +344,9 @@ except Exception:
     print('')
 ")
 
-  [ -z "$parent_id" ] && { log "   ❌ Could not find parent group"; echo ""; return 1; }
+  [ -z "$parent_id" ] && { log "   ❌ Could not find parent group" >&2; echo ""; return 1; }
 
-  log "   🆕 Creating subgroup: $subgroup"
+  log "   🆕 Creating subgroup: $subgroup" >&2
   curl -s \
     --request POST \
     --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
@@ -527,7 +538,17 @@ sync_repo() {
   clone_end=$(date +%s)
   clone_time=$((clone_end - clone_start))
 
-  # ── Metrics ───────────────────────────────────────────────────
+  # ── Post-fetch LFS check ──────────────────────────────────────
+  # Some repos have LFS only on certain branches not in root .gitattributes
+  # Catches cases the pre-clone API check misses
+  if bare_repo_has_lfs "$work_dir"; then
+    log "🗂️  $display_name — LFS detected after fetch, moving to exclusion list"
+    cd /
+    rm -rf "$work_dir"
+    move_to_lfs_file "$source_url"
+    LFS_MOVED=$((LFS_MOVED + 1))
+    return 0
+  fi
   local repo_size repo_size_bytes branch_count tag_count
   repo_size_bytes=$(du -sb "$work_dir" 2>/dev/null | cut -f1 || echo 0)
   repo_size=$(python3 -c "

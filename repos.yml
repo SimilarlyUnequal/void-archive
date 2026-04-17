@@ -1,8 +1,8 @@
 groups:
-#  authpass:
-#  - https://github.com/authpass/kdbx.dart
-#  - https://github.com/authpass/authpass
-#  - https://github.com/authpass/biometric_storage
+ authpass:
+ - https://github.com/authpass/kdbx.dart
+ - https://github.com/authpass/authpass
+ - https://github.com/authpass/biometric_storage
   
   bitwarden:
   - https://github.com/bitwarden/server

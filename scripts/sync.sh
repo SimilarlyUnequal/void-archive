@@ -112,33 +112,6 @@ github_api() {
 # ── Detect LFS via GitHub API ─────────────────────────────────
 # Checks .gitattributes for lfs filter — no cloning needed
 has_lfs() {
-  local owner="$1"
-  local repo="$2"
-  local response
-  response=$(github_api "/repos/${owner}/${repo}/contents/.gitattributes")
-  [ -z "$response" ] && return 1
-  echo "$response" | python3 -c "
-import sys, json, base64
-try:
-    data = json.load(sys.stdin)
-    content = base64.b64decode(data.get('content','')).decode('utf-8',errors='ignore')
-    sys.exit(0 if 'lfs' in content.lower() else 1)
-except Exception:
-    sys.exit(1)
-" 2>/dev/null
-}
-
-# ── Detect LFS in already-cloned bare repo ────────────────────
-# Some repos have LFS only on specific branches, not in root .gitattributes
-bare_repo_has_lfs() {
-  local work_dir="$1"
-  # Check any .gitattributes across all refs for lfs filter
-  git -C "$work_dir" grep -r "filter=lfs" -- "*.gitattributes" \
-    $(git -C "$work_dir" for-each-ref --format='%(refname)') \
-    2>/dev/null | grep -q "filter=lfs"
-}
-
-# ── Get latest commit SHA ─────────────────────────────────────
 get_latest_sha() {
   local owner="$1"
   local repo="$2"
@@ -538,17 +511,6 @@ sync_repo() {
   clone_end=$(date +%s)
   clone_time=$((clone_end - clone_start))
 
-  # ── Post-fetch LFS check ──────────────────────────────────────
-  # Some repos have LFS only on certain branches not in root .gitattributes
-  # Catches cases the pre-clone API check misses
-  if bare_repo_has_lfs "$work_dir"; then
-    log "🗂️  $display_name — LFS detected after fetch, moving to exclusion list"
-    cd /
-    rm -rf "$work_dir"
-    move_to_lfs_file "$source_url"
-    LFS_MOVED=$((LFS_MOVED + 1))
-    return 0
-  fi
   local repo_size repo_size_bytes branch_count tag_count
   repo_size_bytes=$(du -sb "$work_dir" 2>/dev/null | cut -f1 || echo 0)
   repo_size=$(python3 -c "
@@ -563,19 +525,39 @@ else: print(f'{s/1073741824:.2f} GB')
   tag_count=$(git tag | wc -l | tr -d ' ')
 
   # ── Push ──────────────────────────────────────────────────────
-  local push_start push_end push_time retries=0
+  local push_start push_end push_time retries=0 push_error=""
   push_start=$(date +%s)
   local push_attempt=1 push_ok=false
 
   while [ $push_attempt -le $MAX_RETRIES ]; do
-    if silent git push --prune "$dest_url" \
+    push_error=$(git push --prune "$dest_url" \
         '+refs/heads/*:refs/heads/*' \
-        '+refs/tags/*:refs/tags/*'; then
+        '+refs/tags/*:refs/tags/*' 2>&1) && {
       push_ok=true
       break
+    }
+    # Write raw push error to verbose log
+    echo "--- PUSH attempt $push_attempt: $display_name ---" >> "$VERBOSE_LOG"
+    echo "$push_error" >> "$VERBOSE_LOG"
+
+    # Detect LFS error — no point retrying, move to exclusion list
+    if echo "$push_error" | grep -qi "lfs objects are missing\|lfs.*pre-receive\|pre-receive hook declined"; then
+      log "🗂️  $display_name — LFS required by remote, moving to exclusion list"
+      cd /
+      rm -rf "$work_dir"
+      move_to_lfs_file "$source_url"
+      LFS_MOVED=$((LFS_MOVED + 1))
+      return 0
     fi
+
     if [ $push_attempt -lt $MAX_RETRIES ]; then
       retries=$((retries + 1))
+      # Show sanitized error in console
+      echo "$push_error" \
+        | sed 's|https://[^ ]*||g' \
+        | sed "s|$REMOTE_TOKEN|***|g" \
+        | grep -v '^\s*$' | head -3 \
+        | while IFS= read -r line; do log "   $line"; done
       log "   ⚠️  Push attempt $push_attempt failed — retrying in ${RETRY_DELAY}s..."
       sleep $RETRY_DELAY
     fi

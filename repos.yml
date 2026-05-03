@@ -23,9 +23,9 @@ groups:
   - https://github.com/buttercup/fetch
   - https://github.com/buttercup/buttercup-exporter
   
-  fluxer:
-  - https://github.com/fluxerapp/fluxer
-  - https://github.com/fluxerapp/dart_sdk
+#  fluxer:
+#  - https://github.com/fluxerapp/fluxer
+#  - https://github.com/fluxerapp/dart_sdk
   
   wireguard:
   - https://github.com/WireGuard/wireguard-android

@@ -424,60 +424,6 @@ except Exception:
   return 1
 }
 
-# ── Unprotect all branches on a GitLab project ──────────────
-unprotect_all_branches() {
-  local repo_name="$1"
-  local subgroup="$2"
-
-  log "   🔓 Checking branch protections for $repo_name..."
-
-  local proj_path
-  [ -n "$subgroup" ] && proj_path="${PARENT_FOLDER}/${subgroup}/${repo_name}" \
-                     || proj_path="${PARENT_FOLDER}/${repo_name}"
-
-  local project_id
-  project_id=$(get_project_id "$proj_path")
-  if [ -z "$project_id" ]; then
-    log "   ⚠️  Could not find project ID for branch unprotection ($proj_path)"
-    return 0
-  fi
-
-  local protected_branches
-  protected_branches=$(curl -s \
-    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-    "$REMOTE_URL/api/v4/projects/$project_id/protected_branches" \
-    | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    if isinstance(data, list):
-        for b in data:
-            print(b.get('name', ''))
-except Exception as e:
-    pass
-" 2>/dev/null || true)
-
-  if [ -z "$protected_branches" ] || [ "$protected_branches" = "" ]; then
-    log "   🔓 No protected branches found"
-    return 0
-  fi
-
-  while IFS= read -r branch; do
-    [ -z "$branch" ] && continue
-    log "   🔓 Unprotecting branch: $branch"
-    local encoded_branch
-    encoded_branch=$(python3 -c \
-      "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$branch" || true)
-    
-    curl -s --request DELETE \
-      --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-      "$REMOTE_URL/api/v4/projects/$project_id/protected_branches/$encoded_branch" \
-      > /dev/null 2>&1 || true
-  done <<< "$protected_branches"
-  
-  return 0
-}
-
 # ── Sync a single repo ────────────────────────────────────────
 sync_repo() {
   local source_url="$1"
@@ -594,9 +540,6 @@ else: print(f'{s/1073741824:.2f} GB')
   cd "$work_dir"
   branch_count=$(git branch | wc -l | tr -d ' ')
   tag_count=$(git tag | wc -l | tr -d ' ')
-
-  # ── Unprotect branches before push ─────────────────────────
-  unprotect_all_branches "$repo_name" "$subgroup"
 
   # ── Push ──────────────────────────────────────────────────────
   local push_start push_end push_time retries=0

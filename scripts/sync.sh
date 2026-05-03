@@ -429,13 +429,18 @@ unprotect_all_branches() {
   local repo_name="$1"
   local subgroup="$2"
 
+  log "   🔓 Checking branch protections for $repo_name..."
+
   local proj_path
   [ -n "$subgroup" ] && proj_path="${PARENT_FOLDER}/${subgroup}/${repo_name}" \
                      || proj_path="${PARENT_FOLDER}/${repo_name}"
 
   local project_id
   project_id=$(get_project_id "$proj_path")
-  [ -z "$project_id" ] && return 0
+  if [ -z "$project_id" ]; then
+    log "   ⚠️  Could not find project ID for branch unprotection ($proj_path)"
+    return 0
+  fi
 
   local protected_branches
   protected_branches=$(curl -s \
@@ -445,22 +450,32 @@ unprotect_all_branches() {
 import sys, json
 try:
     data = json.load(sys.stdin)
-    for b in data:
-        print(b['name'])
-except Exception:
+    if isinstance(data, list):
+        for b in data:
+            print(b.get('name', ''))
+except Exception as e:
     pass
-" 2>/dev/null)
+" 2>/dev/null || true)
+
+  if [ -z "$protected_branches" ] || [ "$protected_branches" = "" ]; then
+    log "   🔓 No protected branches found"
+    return 0
+  fi
 
   while IFS= read -r branch; do
     [ -z "$branch" ] && continue
+    log "   🔓 Unprotecting branch: $branch"
     local encoded_branch
     encoded_branch=$(python3 -c \
-      "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$branch")
+      "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$branch" || true)
+    
     curl -s --request DELETE \
       --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
       "$REMOTE_URL/api/v4/projects/$project_id/protected_branches/$encoded_branch" \
-      > /dev/null 2>&1
+      > /dev/null 2>&1 || true
   done <<< "$protected_branches"
+  
+  return 0
 }
 
 # ── Sync a single repo ────────────────────────────────────────

@@ -244,41 +244,6 @@ except Exception:
 " 2>/dev/null || echo ""
 }
 
-# ── Unprotect all protected branches on a GitLab project ────────
-unprotect_all_branches() {
-  local project_path="$1"
-  local project_id
-  project_id=$(get_project_id "$project_path")
-  [ -z "$project_id" ] && return 0
-
-  local protected
-  protected=$(curl -s \
-    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-    "$REMOTE_URL/api/v4/projects/$project_id/protected_branches" \
-    | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    for b in data:
-        print(b.get('name',''))
-except Exception:
-    pass
-" 2>/dev/null)
-
-  [ -z "$protected" ] && return 0
-
-  while IFS= read -r branch; do
-    [ -z "$branch" ] && continue
-    local encoded_branch
-    encoded_branch=$(python3 -c \
-      "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$branch")
-    curl -s -o /dev/null \
-      --request DELETE \
-      --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-      "$REMOTE_URL/api/v4/projects/$project_id/protected_branches/$encoded_branch"
-  done <<< "$protected"
-}
-
 # ── Transfer GitLab project to a different namespace ──────────
 transfer_project() {
   local project_id="$1"
@@ -352,17 +317,7 @@ except Exception:
     print('')
 ")
 
-  if [ -n "$existing_id" ]; then
-    # Ensure no default branch protection so mirror pushes never get blocked
-    curl -s -o /dev/null \
-      --request PUT \
-      --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
-      --header "Content-Type: application/json" \
-      --data '{"default_branch_protection": 0}' \
-      "$REMOTE_URL/api/v4/groups/$existing_id"
-    echo "$existing_id"
-    return 0
-  fi
+  [ -n "$existing_id" ] && echo "$existing_id" && return 0
 
   # Create subgroup
   local parent_id
@@ -385,7 +340,7 @@ except Exception:
     --request POST \
     --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
     --header "Content-Type: application/json" \
-    --data "{\"name\":\"$subgroup\",\"path\":\"$subgroup\",\"parent_id\":$parent_id,\"visibility\":\"private\",\"default_branch_protection\":0}" \
+    --data "{\"name\":\"$subgroup\",\"path\":\"$subgroup\",\"parent_id\":$parent_id,\"visibility\":\"private\"}" \
     "$REMOTE_URL/api/v4/groups" \
     | python3 -c "
 import sys, json
@@ -412,7 +367,6 @@ ensure_remote_repo() {
     subgroup_proj_id=$(get_project_id "$full_path")
     if [ -n "$subgroup_proj_id" ]; then
       log "   📦 Repo exists at subgroup path"
-      unprotect_all_branches "$full_path"
       return 0
     fi
 
@@ -468,6 +422,45 @@ except Exception:
 
   log "   ❌ Failed to create repo (HTTP $result): $api_error"
   return 1
+}
+
+# ── Unprotect all branches on a GitLab project ──────────────
+unprotect_all_branches() {
+  local repo_name="$1"
+  local subgroup="$2"
+
+  local proj_path
+  [ -n "$subgroup" ] && proj_path="${PARENT_FOLDER}/${subgroup}/${repo_name}" \
+                     || proj_path="${PARENT_FOLDER}/${repo_name}"
+
+  local project_id
+  project_id=$(get_project_id "$proj_path")
+  [ -z "$project_id" ] && return 0
+
+  local protected_branches
+  protected_branches=$(curl -s \
+    --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+    "$REMOTE_URL/api/v4/projects/$project_id/protected_branches" \
+    | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for b in data:
+        print(b['name'])
+except Exception:
+    pass
+" 2>/dev/null)
+
+  while IFS= read -r branch; do
+    [ -z "$branch" ] && continue
+    local encoded_branch
+    encoded_branch=$(python3 -c \
+      "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$branch")
+    curl -s --request DELETE \
+      --header "PRIVATE-TOKEN: $REMOTE_TOKEN" \
+      "$REMOTE_URL/api/v4/projects/$project_id/protected_branches/$encoded_branch" \
+      > /dev/null 2>&1
+  done <<< "$protected_branches"
 }
 
 # ── Sync a single repo ────────────────────────────────────────
@@ -587,33 +580,21 @@ else: print(f'{s/1073741824:.2f} GB')
   branch_count=$(git branch | wc -l | tr -d ' ')
   tag_count=$(git tag | wc -l | tr -d ' ')
 
+  # ── Unprotect branches before push ─────────────────────────
+  unprotect_all_branches "$repo_name" "$subgroup"
+
   # ── Push ──────────────────────────────────────────────────────
   local push_start push_end push_time retries=0
   push_start=$(date +%s)
-  local push_attempt=1 push_ok=false push_out=""
+  local push_attempt=1 push_ok=false
 
   while [ $push_attempt -le $MAX_RETRIES ]; do
-    push_out=$(git push --prune "$dest_url" \
+    if silent git push --prune "$dest_url" \
         '+refs/heads/*:refs/heads/*' \
-        '+refs/tags/*:refs/tags/*' 2>&1) && { push_ok=true; break; }
-
-    # ── LFS detected at push time → move to exclusion list ──────
-    if echo "$push_out" | grep -qi "lfs objects are missing\|git lfs push"; then
-      log "🗂️  $display_name — LFS detected at push, moving to exclusion list"
-      cd /; rm -rf "$work_dir"
-      move_to_lfs_file "$source_url"
-      LFS_MOVED=$((LFS_MOVED + 1))
-      return 0
+        '+refs/tags/*:refs/tags/*'; then
+      push_ok=true
+      break
     fi
-
-    # Log sanitized push error
-    echo "$push_out" \
-      | sed 's|https://[^ ]*||g' \
-      | sed "s|$REMOTE_TOKEN|***|g" \
-      | grep -v '^\s*$' \
-      | head -5 \
-      | while IFS= read -r line; do log "   $line"; done
-
     if [ $push_attempt -lt $MAX_RETRIES ]; then
       retries=$((retries + 1))
       log "   ⚠️  Push attempt $push_attempt failed — retrying in ${RETRY_DELAY}s..."
@@ -677,7 +658,7 @@ main() {
     url=$(echo "$line" | awk '{print $1}')
     subgroup=$(echo "$line" | awk '{print $2}')
     subgroup="${subgroup:-}"
-    sync_repo "$url" "$subgroup" || true
+    sync_repo "$url" "$subgroup"
   done
 
   TOTAL_END=$(date +%s)
